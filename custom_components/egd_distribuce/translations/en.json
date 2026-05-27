@@ -1,0 +1,29 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "EG.D Distribuce – Sign in",
+        "description": "Enter your credentials from the {portal_url} portal\n→ {path}",
+        "data": {
+          "client_id": "Client ID",
+          "client_secret": "Client Secret",
+          "ean": "Metering point EAN"
+        },
+        "data_description": {
+          "client_id": "Client ID generated in the Distribuce24 portal",
+          "client_secret": "Client Secret generated in the Distribuce24 portal",
+          "ean": "EAN number of your metering point (18 digits)"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid Client ID or Client Secret",
+      "invalid_ean": "Invalid EAN or no permission for this metering point",
+      "cannot_connect": "Unable to connect to the EG.D API",
+      "unknown": "Unexpected error, check the log"
+    },
+    "abort": {
+      "already_configured": "This metering point (EAN) is already configured"
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "domain": "egd_distribuce",
+  "name": "EG.D Distribuce",
+  "version": "1.0.0",
+  "documentation": "https://github.com/home-assistant-egd/egd_distribuce",
+  "issue_tracker": "https://github.com/home-assistant-egd/egd_distribuce/issues",
+  "dependencies": [],
+  "codeowners": [],
+  "requirements": [],
+  "iot_class": "cloud_polling",
+  "config_flow": true
+}

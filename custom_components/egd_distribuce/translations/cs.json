@@ -1,0 +1,29 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "EG.D Distribuce – přihlášení",
+        "description": "Zadejte přihlašovací údaje z portálu {portal_url}\n→ {path}",
+        "data": {
+          "client_id": "Client ID",
+          "client_secret": "Client Secret",
+          "ean": "EAN odběrného místa"
+        },
+        "data_description": {
+          "client_id": "Vygenerovaný Client ID z portálu Distribuce24",
+          "client_secret": "Vygenerovaný Client Secret z portálu Distribuce24",
+          "ean": "EAN číslo vašeho odběrného místa (18 číslic)"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Neplatný Client ID nebo Client Secret",
+      "invalid_ean": "Špatný EAN nebo nemáte oprávnění pro toto odběrné místo",
+      "cannot_connect": "Nelze se připojit k EG.D API",
+      "unknown": "Neočekávaná chyba, zkontrolujte log"
+    },
+    "abort": {
+      "already_configured": "Toto odběrné místo (EAN) je již nakonfigurováno"
+    }
+  }
+}
