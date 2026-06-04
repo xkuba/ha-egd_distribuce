@@ -50,8 +50,13 @@ class EgdDistribuceConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            # Zabráníme duplicitní konfiguraci stejného EAN
-            await self.async_set_unique_id(user_input[CONF_EAN])
+            # Zabráníme duplicitní konfiguraci stejného EAN.
+            # raise_on_progress=False: během (pomalé) validace proti API je flow
+            # "in progress"; bez tohoto by druhý pokus o přidání stejného EAN
+            # spadl na "already_in_progress" místo korektní hlášky.
+            await self.async_set_unique_id(
+                user_input[CONF_EAN], raise_on_progress=False
+            )
             self._abort_if_unique_id_configured()
 
             try:
