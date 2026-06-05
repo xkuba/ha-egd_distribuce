@@ -114,11 +114,13 @@ class EgdSensor(CoordinatorEntity[EgdCoordinator], SensorEntity):
         self._attr_unique_id = f"{ean}_{description.key}"
 
         # Senzor je součástí device = jedno zařízení na EAN
+        meter_label = f"Typ měření {coordinator.meter_type}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, ean)},
             name=f"EG.D Distribuce {ean}",
             manufacturer="EG.D (E.ON Distribuce)",
-            model="Smart Metr OpenAPI",
+            model=meter_label,
+            serial_number=ean,
             entry_type=None,
         )
 
@@ -127,24 +129,25 @@ class EgdSensor(CoordinatorEntity[EgdCoordinator], SensorEntity):
 
     @property
     def native_value(self) -> float | None:
-        """
-        Aktuální hodnota senzoru.
-
-        Pro Energy Dashboard stačí aby senzor existoval a měl správný
-        device_class + state_class. Historická data jsou v recorder statistikách.
-        Zde vracíme None – hodnota se zobrazí z recorder history.
-        """
+        """Hodnota posledního dostupného dne (zobrazena jako stav senzoru)."""
+        if self.coordinator.data:
+            return self.coordinator.data.get("values", {}).get(self.entity_description.data_key)
         return None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Doplňující atributy senzoru."""
-        return {
+        attrs: dict[str, Any] = {
             "ean": self._ean,
             "statistic_id": self._statistic_id,
             "zdroj": "EG.D Distribuce24 OpenAPI",
             "profil_api": self.entity_description.data_key,
         }
+        if self.coordinator.data:
+            datum = self.coordinator.data.get("dates", {}).get(self.entity_description.data_key)
+            if datum:
+                attrs["datum"] = datum
+        return attrs
 
     @property
     def available(self) -> bool:

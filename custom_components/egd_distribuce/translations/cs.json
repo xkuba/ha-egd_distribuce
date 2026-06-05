@@ -7,23 +7,44 @@
         "data": {
           "client_id": "Client ID",
           "client_secret": "Client Secret",
-          "ean": "EAN odběrného místa"
+          "ean": "EAN odběrného místa",
+          "test_mode": "Testovací prostředí"
         },
         "data_description": {
           "client_id": "Vygenerovaný Client ID z portálu Distribuce24",
           "client_secret": "Vygenerovaný Client Secret z portálu Distribuce24",
-          "ean": "EAN číslo vašeho odběrného místa (18 číslic)"
+          "ean": "EAN číslo vašeho odběrného místa (18 číslic) – typ měřiče se zjistí automaticky",
+          "test_mode": "Zapněte pro testování na test.distribuce24.cz (vyžaduje testovací přihlašovací údaje)"
         }
       }
     },
     "error": {
       "invalid_auth": "Neplatný Client ID nebo Client Secret",
-      "invalid_ean": "Špatný EAN nebo nemáte oprávnění pro toto odběrné místo",
+      "invalid_ean": "EAN nebyl nalezen – ověřte číslo nebo propojení API účtu s odběrným místem na portálu Distribuce24",
+      "unsupported_meter": "Typ měřiče C4 není podporován – EGD API poskytuje data pouze pro typy A, B a C1",
       "cannot_connect": "Nelze se připojit k EG.D API",
       "unknown": "Neočekávaná chyba, zkontrolujte log"
     },
     "abort": {
       "already_configured": "Toto odběrné místo (EAN) je již nakonfigurováno"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Nastavení EG.D Distribuce",
+        "data": {
+          "update_hour": "Hodina stahování dat (0–23)",
+          "history_from": "Datum počátku historie (YYYY-MM-DD)"
+        },
+        "data_description": {
+          "update_hour": "Data se stáhnou při prvním spuštění coordinatoru v nebo po této hodině. EGD data jsou obvykle dostupná od odpoledne (doporučeno: 17).",
+          "history_from": "Od tohoto data se při příštím startu stáhne celá historie. Prázdné = posledních 30 dní."
+        }
+      }
+    },
+    "error": {
+      "invalid_date": "Neplatné datum – použijte formát YYYY-MM-DD (např. 2026-06-04)"
     }
   }
 }

@@ -9,7 +9,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import EgdApi
-from .const import CONF_CLIENT_ID, CONF_CLIENT_SECRET, CONF_EAN, COORDINATOR_KEY, DOMAIN
+from .const import CONF_CLIENT_ID, CONF_CLIENT_SECRET, CONF_EAN, CONF_TEST_MODE, COORDINATOR_KEY, DOMAIN
 from .coordinator import EgdCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -25,6 +25,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         session=session,
         client_id=entry.data[CONF_CLIENT_ID],
         client_secret=entry.data[CONF_CLIENT_SECRET],
+        test_mode=entry.data.get(CONF_TEST_MODE, False),
     )
 
     coordinator = EgdCoordinator(
@@ -32,6 +33,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         api=api,
         ean=entry.data[CONF_EAN],
         entry_id=entry.entry_id,
+        entry=entry,
     )
 
     # První refresh – stáhne historii a nastaví statistiky

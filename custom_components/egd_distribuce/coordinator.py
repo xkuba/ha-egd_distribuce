@@ -2,23 +2,32 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from typing import Any
 
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.components.recorder import get_instance
-from homeassistant.components.recorder.models import StatisticData, StatisticMetaData
+from homeassistant.components.recorder.models import StatisticData, StatisticMeanType, StatisticMetaData
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
     get_last_statistics,
-    statistics_during_period,
 )
-from homeassistant.const import UnitOfEnergy, UnitOfReactivePower
+from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 import homeassistant.util.dt as dt_util
 
 from .api import EgdApi, EgdApiError
-from .const import CONF_EAN, DEFAULT_SCAN_DAYS, DEFAULT_UPDATE_HOUR, DOMAIN
+from .const import (
+    CONF_EAN,
+    CONF_HISTORY_FROM,
+    CONF_METER_TYPE,
+    CONF_UPDATE_HOUR,
+    DEFAULT_SCAN_DAYS,
+    DEFAULT_UPDATE_HOUR,
+    DOMAIN,
+    METER_TYPE_AB,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -56,11 +65,15 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         api: EgdApi,
         ean: str,
         entry_id: str,
+        entry: ConfigEntry,
     ) -> None:
         self.api = api
         self.ean = ean
         self.entry_id = entry_id
+        self._entry = entry
         self._initial_sync_done = False
+        self._latest_values: dict[str, float] = {}
+        self._latest_dates: dict[str, date] = {}
 
         super().__init__(
             hass,
@@ -77,20 +90,36 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_update_data(self) -> dict[str, Any]:
         """Stáhne nová data a zapíše statistiky do HA recorderu."""
         now = dt_util.now()
+        update_hour = self._entry.options.get(CONF_UPDATE_HOUR, DEFAULT_UPDATE_HOUR)
 
-        # Při prvním spuštění stáhneme historii za posledních N dní
         if not self._initial_sync_done:
-            await self._sync_history(DEFAULT_SCAN_DAYS)
+            days = self._resolve_history_days()
+            await self._sync_history(days)
             self._initial_sync_done = True
             return self._build_state()
 
-        # Denní aktualizace: stahujeme jen pokud je >= DEFAULT_UPDATE_HOUR
-        # (data jsou dostupná až odpoledne)
-        if now.hour >= DEFAULT_UPDATE_HOUR:
+        if now.hour >= update_hour:
             yesterday = date.today() - timedelta(days=1)
             await self._sync_range(yesterday, yesterday)
 
         return self._build_state()
+
+    def _resolve_history_days(self) -> int:
+        """Vrátí počet dní zpětné historie dle options (nebo výchozí hodnotu)."""
+        history_from_str = self._entry.options.get(CONF_HISTORY_FROM, "").strip()
+        if history_from_str:
+            try:
+                history_from = date.fromisoformat(history_from_str)
+                days = (date.today() - history_from).days
+                return max(days, 1)
+            except ValueError:
+                _LOGGER.warning("EGD: neplatné datum history_from '%s', použiji %d dní", history_from_str, DEFAULT_SCAN_DAYS)
+        return DEFAULT_SCAN_DAYS
+
+    @property
+    def meter_type(self) -> str:
+        """Typ měřiče z konfigurace."""
+        return self._entry.data.get(CONF_METER_TYPE, METER_TYPE_AB)
 
     # ------------------------------------------------------------------
     # Synchronizace dat
@@ -113,10 +142,17 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Stáhne a uloží data pro zadaný rozsah dat."""
         try:
             daily_data = await self.api.async_get_daily_data(
-                self.ean, date_from, date_to
+                self.ean, date_from, date_to, meter_type=self.meter_type
             )
         except EgdApiError as err:
             raise UpdateFailed(f"EGD API chyba: {err}") from err
+
+        # Uložíme poslední dostupný den pro zobrazení v senzorech
+        for data_key, daily in daily_data.items():
+            if daily:
+                last_day = max(daily.keys())
+                self._latest_values[data_key] = round(daily[last_day], 4)
+                self._latest_dates[data_key] = last_day
 
         # Zapíšeme každý datový typ jako statistiku
         for data_key, (stat_suffix, unit, name) in STAT_DEFINITIONS.items():
@@ -149,6 +185,7 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         metadata = StatisticMetaData(
             has_mean=False,
             has_sum=True,
+            mean_type=StatisticMeanType.NONE,
             name=name,
             source=DOMAIN,
             statistic_id=statistic_id,
@@ -194,12 +231,12 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # ------------------------------------------------------------------
 
     def _build_state(self) -> dict[str, Any]:
-        """Vrátí dict se včerejšími hodnotami pro klasické senzory."""
-        # Senzory zobrazují poslední dostupný den (včera)
-        # Historická data jsou v recorder statistikách
+        """Vrátí dict s posledními dostupnými denními hodnotami pro senzory."""
         return {
             "ean": self.ean,
             "last_updated": dt_util.now().isoformat(),
+            "values": self._latest_values,
+            "dates": {k: v.isoformat() for k, v in self._latest_dates.items()},
         }
 
     # ------------------------------------------------------------------

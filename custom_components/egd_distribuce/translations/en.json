@@ -7,23 +7,44 @@
         "data": {
           "client_id": "Client ID",
           "client_secret": "Client Secret",
-          "ean": "Metering point EAN"
+          "ean": "Metering point EAN",
+          "test_mode": "Test environment"
         },
         "data_description": {
           "client_id": "Client ID generated in the Distribuce24 portal",
           "client_secret": "Client Secret generated in the Distribuce24 portal",
-          "ean": "EAN number of your metering point (18 digits)"
+          "ean": "EAN number of your metering point (18 digits) – meter type is detected automatically",
+          "test_mode": "Enable to use test.distribuce24.cz (requires test credentials)"
         }
       }
     },
     "error": {
       "invalid_auth": "Invalid Client ID or Client Secret",
-      "invalid_ean": "Invalid EAN or no permission for this metering point",
+      "invalid_ean": "EAN not found – verify the number or link the API account to the metering point in the Distribuce24 portal",
+      "unsupported_meter": "Meter type C4 is not supported – EGD API provides data only for types A, B and C1",
       "cannot_connect": "Unable to connect to the EG.D API",
       "unknown": "Unexpected error, check the log"
     },
     "abort": {
       "already_configured": "This metering point (EAN) is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "EG.D Distribuce settings",
+        "data": {
+          "update_hour": "Data download hour (0–23)",
+          "history_from": "History start date (YYYY-MM-DD)"
+        },
+        "data_description": {
+          "update_hour": "Data will be downloaded on the first coordinator run at or after this hour. EGD data is usually available from the afternoon (recommended: 17).",
+          "history_from": "Full history will be downloaded from this date on next restart. Empty = last 30 days."
+        }
+      }
+    },
+    "error": {
+      "invalid_date": "Invalid date – use YYYY-MM-DD format (e.g. 2026-06-04)"
     }
   }
 }
