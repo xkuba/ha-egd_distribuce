@@ -22,17 +22,29 @@ METER_TYPE_AB = "AB"
 METER_TYPE_C1 = "C1"
 CONF_METER_TYPE = "meter_type"
 
-# Profily typ A/B – preferujeme kWh (od 1.7.2024), fallback na kW ÷ 4
-PROFILE_ICC1 = "ICC1"   # Spotřeba ze sítě – výkon kW
-PROFILE_ICQ2 = "ICQ2"   # Spotřeba ze sítě – energie kWh (od 1.7.2024)
-PROFILE_ISC1 = "ISC1"   # Dodávka do sítě (FVE přetoky) – výkon kW
-PROFILE_ISQ2 = "ISQ2"   # Dodávka do sítě – energie kWh (od 1.7.2024)
-PROFILE_IKC1 = "IKC1"   # Jalová spotřeba – výkon kVAr
-PROFILE_IMC1 = "IMC1"   # Jalová dodávka – výkon kVAr
+# Profily typ A/B – spotřeba a výroba (kWh od 1.7.2024, fallback kW ÷ 4)
+PROFILE_ICC1 = "ICC1"   # Výkon spotřeby ze sítě – kW
+PROFILE_ICQ2 = "ICQ2"   # Spotřeba energie odebrané ze sítě – kWh (preferováno)
+PROFILE_ISC1 = "ISC1"   # Výkon dodávky do sítě (FVE přetoky) – kW
+PROFILE_ISQ2 = "ISQ2"   # Energie dodávky do sítě – kWh (preferováno)
+PROFILE_ISQS = "ISQS"   # Energie dodávky ponížené v rámci sdílení – A, B
 
-# Profily typ C1 (nové kódy dle dokumentace 2026-05)
-PROFILE_C1_CONSUMPTION = "DCQC"   # Spotřeba energie ze sítě – C1
-PROFILE_C1_PRODUCTION  = "DSQC"   # Dodávka energie do sítě – C1
+# Profily typ A/B – sdílení energie
+PROFILE_ICQS = "ICQS"   # Spotřeba energie v rámci sdílení – obchodní – A, B
+PROFILE_ICQD = "ICQD"   # Spotřeba energie v rámci sdílení – distribuční – A, B
+
+# Profily typ A/B – jalová energie (preferujeme kWh, fallback kW ÷ 4)
+PROFILE_IKC2 = "IKC2"   # Výkon jalové spotřeby při spotřebě – kVAr (preferováno)
+PROFILE_IKC1 = "IKC1"   # Výkon jalové spotřeby při spotřebě – kVAr (starší, fallback)
+PROFILE_IMQ2 = "IMQ2"   # Energie jalové dodávky při spotřebě – kVArh (preferováno)
+PROFILE_IMC1 = "IMC1"   # Výkon jalové dodávky při spotřebě – kVAr (fallback)
+
+# Profily typ C1 (kódy dle /rest/profily)
+PROFILE_C1_CONSUMPTION          = "DCQC"   # Spotřeba energie odebrané ze sítě – C1
+PROFILE_C1_PRODUCTION           = "DSQC"   # Energie dodávky do sítě (přetok) – C1
+PROFILE_C1_SHARING_COMMERCIAL   = "DCQS"   # Spotřeba energie v rámci sdílení – obchodní – C1
+PROFILE_C1_SHARING_DISTRIBUTION = "DCQD"   # Spotřeba energie v rámci sdílení – distribuční – C1
+PROFILE_C1_PRODUCTION_SHARING   = "DSQS"   # Energie dodávky ponížené v rámci sdílení – C1
 
 # Platný status hodnoty – sjednoceno: W platí pro A/B i C1 (dle dokumentace 2026-05)
 STATUS_VALID = "W"

@@ -37,13 +37,14 @@ def _load_env() -> tuple[str, str, str, bool]:
     client_secret = os.environ.get("EGD_CLIENT_SECRET", "")
     ean           = os.environ.get("EGD_EAN", "").strip()
     test_mode     = os.environ.get("EGD_TEST_MODE", "true").lower() != "false"
+    test_date_str = os.environ.get("EGD_TEST_DATE", "").strip()
 
     missing = [n for n, v in [("EGD_CLIENT_ID", client_id), ("EGD_CLIENT_SECRET", client_secret)] if not v]
     if missing:
         print(f"CHYBA: chybí proměnné: {', '.join(missing)}")
         sys.exit(1)
 
-    return client_id, client_secret, ean, test_mode
+    return client_id, client_secret, ean, test_mode, test_date_str
 
 
 # ---------------------------------------------------------------------------
@@ -62,9 +63,31 @@ URLS_PROD = {
 }
 SCOPE = "namerena_data_openapi"
 
+# Profily pro A/B: (label, kód, is_power_kw)
+# is_power_kw=True  → API vrací kW, přepočet ÷ 4 na kWh za 15 min
+# is_power_kw=False → API vrací přímo kWh
+PROFILES_AB = [
+    ("Spotřeba ze sítě (ICQ2/kWh)",        "ICQ2", False),
+    ("Spotřeba ze sítě – fallback (ICC1/kW)", "ICC1", True),
+    ("Dodávka do sítě (ISQ2/kWh)",         "ISQ2", False),
+    ("Sdílení – obchodní (ICQS)",          "ICQS", False),
+    ("Sdílení – distribuční (ICQD)",       "ICQD", False),
+    ("Dodávka ponížená sdílením (ISQS)",   "ISQS", False),
+    ("Jalová spotřeba (IKC2/kW)",          "IKC2", True),
+    ("Jalová dodávka (IMQ2/kWh)",          "IMQ2", False),
+]
+
 PROFILES = {
-    "AB":  {"consumption": "ICC1",  "production": "ISC1"},
-    "C1":  {"consumption": "DCQC",  "production": "DSQC"},
+    "AB": {
+        "consumption": "ICC1",
+        "production":  "ISC1",
+    },
+    "C1": {
+        "consumption":           "DCQC",
+        "production":            "DSQC",
+        "sharing_commercial":    "DCQS",
+        "sharing_distribution":  "DCQD",
+    },
 }
 SUPPORTED_TYPES = {"A", "B", "C1"}
 
@@ -115,12 +138,16 @@ async def get_om_list(session: aiohttp.ClientSession, token: str, urls: dict) ->
 async def test_profile(
     session: aiohttp.ClientSession, token: str, ean: str,
     test_date: date, urls: dict, label: str, profile: str,
-) -> None:
+    is_power_kw: bool = False,
+) -> list[dict] | None:
+    """Vrátí záznamy při úspěchu, None při chybě."""
     headers = {"Authorization": f"Bearer {token}"}
+    # Exkluzivní dolní mez: from = předchozí den 23:45, aby byl zahrnut interval 00:00
+    prev_day = test_date - timedelta(days=1)
     params  = {"ean": ean, "profile": profile,
-                "from": f"{test_date.isoformat()}T00:00:00.000",
-                "to":   f"{test_date.isoformat()}T23:45:00.000",
-                "pageStart": "1", "pageSize": "10"}
+                "from": f"{prev_day.isoformat()}T23:45:00.000",
+                "to":   f"{test_date.isoformat()}T23:59:00.000",
+                "pageStart": "1", "pageSize": "200"}
     async with session.get(urls["data"], headers=headers, params=params,
                            timeout=aiohttp.ClientTimeout(total=30)) as resp:
         body = await resp.text()
@@ -128,11 +155,26 @@ async def test_profile(
             data    = json.loads(body)
             records = data[0].get("data", []) if data else []
             statuses = {r.get("status") for r in records}
-            _ok(f"{label} (profil {profile}): {len(records)} záznamů, statusy: {statuses}")
+            valid   = [r for r in records if r.get("status") == "W"]
+            total   = sum(float(r["value"]) / 4.0 if is_power_kw else float(r["value"])
+                          for r in valid if r.get("value") is not None)
+            unit    = "kWh" if not is_power_kw else "kWh (z kW÷4)"
+            _ok(f"{label} (profil {profile}): {len(records)} zázn, sum={total:.4f} {unit}, statusy: {statuses}")
             for r in records[:2]:
                 print(f"       {r}")
+            return records
         else:
-            _err(f"{label} (profil {profile}): HTTP {resp.status}: {body}")
+            _err(f"{label} (profil {profile}): HTTP {resp.status}: {body[:200]}")
+            return None
+
+
+def _records_are_identical(a: list[dict], b: list[dict]) -> bool:
+    if len(a) != len(b):
+        return False
+    return all(
+        x.get("timestamp") == y.get("timestamp") and x.get("value") == y.get("value")
+        for x, y in zip(a, b)
+    )
 
 
 async def test_ean(
@@ -140,17 +182,52 @@ async def test_ean(
     ean: str, typ_mereni: str, test_date: date, urls: dict,
 ) -> None:
     meter_key = "AB" if typ_mereni.upper() in ("A", "B") else typ_mereni.upper()
-    profiles  = PROFILES.get(meter_key)
 
     print(f"\n  EAN: {ean}  |  Typ měřiče: {typ_mereni}")
     print(f"  {'-' * 50}")
 
-    if not profiles:
+    if meter_key not in SUPPORTED_TYPES and meter_key != "AB":
         _warn(f"Typ {typ_mereni} není podporován – přeskakuji")
         return
 
-    await test_profile(session, token, ean, test_date, urls, "Spotřeba", profiles["consumption"])
-    await test_profile(session, token, ean, test_date, urls, "Dodávka (FVE)", profiles["production"])
+    if meter_key == "AB":
+        # Test všech A/B profilů s výpisem součtu
+        records_by_profile: dict[str, list[dict]] = {}
+        for label, profile, is_kw in PROFILES_AB:
+            records = await test_profile(session, token, ean, test_date, urls, label, profile, is_kw)
+            if records is not None:
+                records_by_profile[profile] = records
+
+        # Mirror detection: ISQ2 vs ICQ2
+        icq2 = records_by_profile.get("ICQ2", [])
+        isq2 = records_by_profile.get("ISQ2", [])
+        if icq2 and isq2:
+            if _records_are_identical(icq2, isq2):
+                _warn("DETEKCE ZRCADLENÍ: ISQ2 == ICQ2 → EAN NEMÁ výrobu (API zrcadlí spotřebu)")
+            else:
+                _ok("ISQ2 ≠ ICQ2 → EAN MÁ výrobu (data se liší)")
+        elif icq2 and not isq2:
+            _ok("ISQ2 vrátil chybu (HTTP 400) → EAN NEMÁ výrobu")
+
+    else:
+        # C1 – původní profily
+        profiles = PROFILES.get(meter_key, {})
+        dcqc_records = None
+        for label, key in [
+            ("Spotřeba ze sítě",              "consumption"),
+            ("Dodávka do sítě (FVE/přetok)",  "production"),
+            ("Sdílení – obchodní (DCQS)",      "sharing_commercial"),
+            ("Sdílení – distribuční (DCQD)",   "sharing_distribution"),
+        ]:
+            if key in profiles:
+                recs = await test_profile(session, token, ean, test_date, urls, label, profiles[key])
+                if key == "consumption":
+                    dcqc_records = recs
+                if key == "production" and dcqc_records and recs:
+                    if _records_are_identical(dcqc_records, recs):
+                        _warn("DETEKCE ZRCADLENÍ: DSQC == DCQC → EAN NEMÁ výrobu")
+                    else:
+                        _ok("DSQC ≠ DCQC → EAN MÁ výrobu")
 
 
 # ---------------------------------------------------------------------------
@@ -158,15 +235,23 @@ async def test_ean(
 # ---------------------------------------------------------------------------
 
 async def main() -> None:
-    client_id, client_secret, ean_filter, test_mode = _load_env()
+    client_id, client_secret, ean_filter, test_mode, test_date_str = _load_env()
 
-    urls      = URLS_TEST if test_mode else URLS_PROD
-    yesterday = date.today() - timedelta(days=1)
+    urls = URLS_TEST if test_mode else URLS_PROD
+
+    if test_date_str:
+        try:
+            test_date = date.fromisoformat(test_date_str)
+        except ValueError:
+            print(f"CHYBA: neplatné datum EGD_TEST_DATE='{test_date_str}', použij formát YYYY-MM-DD")
+            sys.exit(1)
+    else:
+        test_date = date.today() - timedelta(days=1)
 
     print(f"\nEGD OpenAPI test")
     print(f"Prostředí: {'TESTOVACÍ (test.distribuce24.cz)' if test_mode else 'PRODUKČNÍ (data.distribuce24.cz)'}")
     print(f"EAN:       {ean_filter or '(všechny z /om)'}")
-    print(f"Datum:     {yesterday}")
+    print(f"Datum:     {test_date}")
 
     async with aiohttp.ClientSession() as session:
         token = await get_token(session, client_id, client_secret, urls)
@@ -190,7 +275,7 @@ async def main() -> None:
 
         _section("3. Test profilů")
         for item in to_test:
-            await test_ean(session, token, item["ean"], item.get("typMereni", "?"), yesterday, urls)
+            await test_ean(session, token, item["ean"], item.get("typMereni", "?"), test_date, urls)
 
     print()
 

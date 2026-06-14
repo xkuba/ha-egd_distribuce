@@ -1,0 +1,601 @@
+{
+  "info": {
+    "name": "EG.D Distribuce – PRODUKCE",
+    "description": "EG.D Distribuce OpenAPI – produkční prostředí (data.distribuce24.cz).\n\n**Postup:**\n1. Nastav proměnné kolekce: `client_id`, `client_secret`, `ean`, `date_from`, `date_to`\n2. Spusť **1. Získat token** – token se automaticky uloží do `{{access_token}}`\n3. Spusť ostatní požadavky dle potřeby\n\n**Hranice časového rozsahu (spotreby):**\nAPI používá exkluzivní dolní mez – parametr `from` je automaticky posunut na `{date_from - 1 den}T23:45:00.000`, aby byl zahrnut interval 00:00 prvního dne. Tuto logiku zajišťuje Pre-request Script ve složkách spotreby.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "client_id",     "value": "", "description": "OAuth2 client_id z developer portálu distribuce24.cz", "type": "string" },
+    { "key": "client_secret", "value": "", "description": "OAuth2 client_secret", "type": "string" },
+    { "key": "ean",           "value": "", "description": "EAN odběrného místa (18 číslic)", "type": "string" },
+    { "key": "date_from",     "value": "2026-05-31", "description": "Datum od (YYYY-MM-DD)", "type": "string" },
+    { "key": "date_to",       "value": "2026-05-31", "description": "Datum do (YYYY-MM-DD)", "type": "string" },
+    { "key": "access_token",  "value": "", "description": "Automaticky plněno po volání tokenu", "type": "string" },
+    { "key": "_from_excl",    "value": "", "description": "Automaticky počítáno: {date_from - 1 den}T23:45 (exkluzivní dolní mez API)", "type": "string" },
+    { "key": "_to_incl",      "value": "", "description": "Automaticky počítáno: {date_to}T23:59", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "1. Získat token (OAuth2 client_credentials)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var json = pm.response.json();",
+                  "if (json.access_token) {",
+                  "    pm.collectionVariables.set('access_token', json.access_token);",
+                  "    console.log('Token uložen, délka:', json.access_token.length);",
+                  "    pm.test('Token získán', function() { pm.expect(json.access_token).to.be.a('string'); });",
+                  "} else {",
+                  "    pm.test('Token získán', function() { throw new Error('access_token chybí v odpovědi: ' + JSON.stringify(json)); });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"grant_type\": \"client_credentials\",\n  \"client_id\": \"{{client_id}}\",\n  \"client_secret\": \"{{client_secret}}\",\n  \"scope\": \"namerena_data_openapi\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "https://idm.distribuce24.cz/oauth/token",
+              "protocol": "https",
+              "host": ["idm", "distribuce24", "cz"],
+              "path": ["oauth", "token"]
+            },
+            "description": "OAuth2 client_credentials grant. Po úspěchu se token automaticky uloží do `{{access_token}}` a použije ve všech dalších požadavcích."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Odběrná místa",
+      "item": [
+        {
+          "name": "2. Seznam odběrných míst (/om)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": {
+              "raw": "https://data.distribuce24.cz/rest/om",
+              "protocol": "https",
+              "host": ["data", "distribuce24", "cz"],
+              "path": ["rest", "om"]
+            },
+            "description": "Vrátí seznam odběrných míst (EAN) přiřazených k API účtu včetně typu měřiče (`typMereni`: A, B, C1).\n\nPoužij pro zjištění dostupných EAN a jejich typů."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Profily a statusy",
+      "item": [
+        {
+          "name": "3. Dostupné profily pro EAN (/profily)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": {
+              "raw": "https://data.distribuce24.cz/rest/profily?ean={{ean}}",
+              "protocol": "https",
+              "host": ["data", "distribuce24", "cz"],
+              "path": ["rest", "profily"],
+              "query": [
+                { "key": "ean", "value": "{{ean}}", "description": "EAN odběrného místa" }
+              ]
+            },
+            "description": "Vrátí seznam profilů dostupných pro zadaný EAN.\n\nTypické profily dle typu měřiče:\n- **A/B:** ICQ2, ISQ2, ICQS, ICQD, ISQS, ICC1, ISC1, IKC2, IKC1, IMQ2, IMC1\n- **C1:** DCQC, DSQC, DCQS, DCQD, DSQS"
+          }
+        },
+        {
+          "name": "4. Statusy měření (/statusy)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var df = pm.collectionVariables.get('date_from');",
+                  "var dt = pm.collectionVariables.get('date_to');",
+                  "var p = df.split('-');",
+                  "var prev = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]) - 1);",
+                  "var py = prev.getFullYear();",
+                  "var pmo = String(prev.getMonth() + 1).padStart(2, '0');",
+                  "var pd = String(prev.getDate()).padStart(2, '0');",
+                  "pm.collectionVariables.set('_from_excl', py + '-' + pmo + '-' + pd + 'T23:45:00.000');",
+                  "pm.collectionVariables.set('_to_incl', dt + 'T23:59:00.000');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "url": {
+              "raw": "https://data.distribuce24.cz/rest/statusy?ean={{ean}}&from={{_from_excl}}&to={{_to_incl}}",
+              "protocol": "https",
+              "host": ["data", "distribuce24", "cz"],
+              "path": ["rest", "statusy"],
+              "query": [
+                { "key": "ean",  "value": "{{ean}}" },
+                { "key": "from", "value": "{{_from_excl}}", "description": "Auto: {date_from-1}T23:45 (exkluzivní dolní mez)" },
+                { "key": "to",   "value": "{{_to_incl}}",   "description": "Auto: {date_to}T23:59" }
+              ]
+            },
+            "description": "Vrátí statusy kvality měření pro zadaný EAN a časové rozmezí.\n\nStatus `W` = Hodnota platná (Wert), ostatní = různé stavy náhrady nebo chyby."
+          }
+        }
+      ]
+    },
+    {
+      "name": "A/B – kWh profily (od 1. 7. 2024)",
+      "description": "Energetické profily v kWh dostupné pro typ A a B od 1. 7. 2024.\n\nPro data před tímto datem použij složku 'A/B – kW profily (výkon)'.",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "var df = pm.collectionVariables.get('date_from');",
+              "var dt = pm.collectionVariables.get('date_to');",
+              "var p = df.split('-');",
+              "var prev = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]) - 1);",
+              "var py = prev.getFullYear();",
+              "var pmo = String(prev.getMonth() + 1).padStart(2, '0');",
+              "var pd = String(prev.getDate()).padStart(2, '0');",
+              "// API: exkluzivní dolní mez – from = prev_day T23:45 pro zachycení intervalu 00:00",
+              "pm.collectionVariables.set('_from_excl', py + '-' + pmo + '-' + pd + 'T23:45:00.000');",
+              "pm.collectionVariables.set('_to_incl', dt + 'T23:59:00.000');"
+            ]
+          }
+        }
+      ],
+      "item": [
+        {
+          "name": "5a. ICQ2 – Spotřeba ze sítě (kWh)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": {
+              "raw": "https://data.distribuce24.cz/rest/spotreby?ean={{ean}}&profile=ICQ2&from={{_from_excl}}&to={{_to_incl}}&pageStart=1&pageSize=3000",
+              "protocol": "https",
+              "host": ["data", "distribuce24", "cz"],
+              "path": ["rest", "spotreby"],
+              "query": [
+                { "key": "ean",       "value": "{{ean}}" },
+                { "key": "profile",   "value": "ICQ2" },
+                { "key": "from",      "value": "{{_from_excl}}" },
+                { "key": "to",        "value": "{{_to_incl}}" },
+                { "key": "pageStart", "value": "1" },
+                { "key": "pageSize",  "value": "3000" }
+              ]
+            },
+            "description": "Čtvrthodinová spotřeba energie odebrané ze sítě.\n\n**Jednotka:** kWh za interval\n**Platný status:** `W`\n**Preferovaný profil** pro typ A/B (od 1. 7. 2024)"
+          }
+        },
+        {
+          "name": "5b. ISQ2 – Dodávka do sítě / FVE přetoky (kWh)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": {
+              "raw": "https://data.distribuce24.cz/rest/spotreby?ean={{ean}}&profile=ISQ2&from={{_from_excl}}&to={{_to_incl}}&pageStart=1&pageSize=3000",
+              "protocol": "https",
+              "host": ["data", "distribuce24", "cz"],
+              "path": ["rest", "spotreby"],
+              "query": [
+                { "key": "ean",       "value": "{{ean}}" },
+                { "key": "profile",   "value": "ISQ2" },
+                { "key": "from",      "value": "{{_from_excl}}" },
+                { "key": "to",        "value": "{{_to_incl}}" },
+                { "key": "pageStart", "value": "1" },
+                { "key": "pageSize",  "value": "3000" }
+              ]
+            },
+            "description": "Čtvrthodinová energie dodávky do sítě (FVE přetoky).\n\n**Jednotka:** kWh za interval\n**Platný status:** `W`\n**Poznámka:** Pro EAN bez výrobny vrátí API HTTP 400 `validation_error`."
+          }
+        },
+        {
+          "name": "5c. ICQS – Sdílení energie – obchodní (kWh)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": {
+              "raw": "https://data.distribuce24.cz/rest/spotreby?ean={{ean}}&profile=ICQS&from={{_from_excl}}&to={{_to_incl}}&pageStart=1&pageSize=3000",
+              "protocol": "https",
+              "host": ["data", "distribuce24", "cz"],
+              "path": ["rest", "spotreby"],
+              "query": [
+                { "key": "ean",       "value": "{{ean}}" },
+                { "key": "profile",   "value": "ICQS" },
+                { "key": "from",      "value": "{{_from_excl}}" },
+                { "key": "to",        "value": "{{_to_incl}}" },
+                { "key": "pageStart", "value": "1" },
+                { "key": "pageSize",  "value": "3000" }
+              ]
+            },
+            "description": "Spotřeba energie pokrytá sdílením – obchodní část.\n\n**Jednotka:** kWh za interval\n**Platný status:** `W`\n**Dostupnost:** Pouze pro EAN zapojené do sdílení energie. Bez zapojení vrátí HTTP 400."
+          }
+        },
+        {
+          "name": "5d. ICQD – Sdílení energie – distribuční (kWh)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": {
+              "raw": "https://data.distribuce24.cz/rest/spotreby?ean={{ean}}&profile=ICQD&from={{_from_excl}}&to={{_to_incl}}&pageStart=1&pageSize=3000",
+              "protocol": "https",
+              "host": ["data", "distribuce24", "cz"],
+              "path": ["rest", "spotreby"],
+              "query": [
+                { "key": "ean",       "value": "{{ean}}" },
+                { "key": "profile",   "value": "ICQD" },
+                { "key": "from",      "value": "{{_from_excl}}" },
+                { "key": "to",        "value": "{{_to_incl}}" },
+                { "key": "pageStart", "value": "1" },
+                { "key": "pageSize",  "value": "3000" }
+              ]
+            },
+            "description": "Spotřeba energie pokrytá sdílením – distribuční část.\n\n**Jednotka:** kWh za interval\n**Platný status:** `W`\n**Dostupnost:** Pouze pro EAN zapojené do sdílení energie."
+          }
+        },
+        {
+          "name": "5e. ISQS – Dodávka ponížená sdílením (kWh)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": {
+              "raw": "https://data.distribuce24.cz/rest/spotreby?ean={{ean}}&profile=ISQS&from={{_from_excl}}&to={{_to_incl}}&pageStart=1&pageSize=3000",
+              "protocol": "https",
+              "host": ["data", "distribuce24", "cz"],
+              "path": ["rest", "spotreby"],
+              "query": [
+                { "key": "ean",       "value": "{{ean}}" },
+                { "key": "profile",   "value": "ISQS" },
+                { "key": "from",      "value": "{{_from_excl}}" },
+                { "key": "to",        "value": "{{_to_incl}}" },
+                { "key": "pageStart", "value": "1" },
+                { "key": "pageSize",  "value": "3000" }
+              ]
+            },
+            "description": "Energie dodávky do sítě ponížená o objem přidělený sdílení.\n\n**Jednotka:** kWh za interval\n**Platný status:** `W`\n**Dostupnost:** Pouze pro výrobní EAN zapojená do sdílení energie."
+          }
+        }
+      ]
+    },
+    {
+      "name": "A/B – kW profily – výkon (starší / fallback)",
+      "description": "Profily výkonu v kW. Primárně pro data před 1. 7. 2024, nebo jako fallback pokud kWh profily nejsou dostupné.\n\nPřepočet na energii: hodnota_kW ÷ 4 = kWh za 15minutový interval.",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "var df = pm.collectionVariables.get('date_from');",
+              "var dt = pm.collectionVariables.get('date_to');",
+              "var p = df.split('-');",
+              "var prev = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]) - 1);",
+              "var py = prev.getFullYear();",
+              "var pmo = String(prev.getMonth() + 1).padStart(2, '0');",
+              "var pd = String(prev.getDate()).padStart(2, '0');",
+              "pm.collectionVariables.set('_from_excl', py + '-' + pmo + '-' + pd + 'T23:45:00.000');",
+              "pm.collectionVariables.set('_to_incl', dt + 'T23:59:00.000');"
+            ]
+          }
+        }
+      ],
+      "item": [
+        {
+          "name": "6a. ICC1 – Spotřeba ze sítě (kW)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": {
+              "raw": "https://data.distribuce24.cz/rest/spotreby?ean={{ean}}&profile=ICC1&from={{_from_excl}}&to={{_to_incl}}&pageStart=1&pageSize=3000",
+              "protocol": "https",
+              "host": ["data", "distribuce24", "cz"],
+              "path": ["rest", "spotreby"],
+              "query": [
+                { "key": "ean",       "value": "{{ean}}" },
+                { "key": "profile",   "value": "ICC1" },
+                { "key": "from",      "value": "{{_from_excl}}" },
+                { "key": "to",        "value": "{{_to_incl}}" },
+                { "key": "pageStart", "value": "1" },
+                { "key": "pageSize",  "value": "3000" }
+              ]
+            },
+            "description": "Čtvrthodinový výkon spotřeby ze sítě.\n\n**Jednotka:** kW\n**Přepočet na kWh:** hodnota ÷ 4\n**Platný status:** `W`"
+          }
+        },
+        {
+          "name": "6b. ISC1 – Dodávka do sítě / FVE přetoky (kW)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": {
+              "raw": "https://data.distribuce24.cz/rest/spotreby?ean={{ean}}&profile=ISC1&from={{_from_excl}}&to={{_to_incl}}&pageStart=1&pageSize=3000",
+              "protocol": "https",
+              "host": ["data", "distribuce24", "cz"],
+              "path": ["rest", "spotreby"],
+              "query": [
+                { "key": "ean",       "value": "{{ean}}" },
+                { "key": "profile",   "value": "ISC1" },
+                { "key": "from",      "value": "{{_from_excl}}" },
+                { "key": "to",        "value": "{{_to_incl}}" },
+                { "key": "pageStart", "value": "1" },
+                { "key": "pageSize",  "value": "3000" }
+              ]
+            },
+            "description": "Čtvrthodinový výkon dodávky do sítě (FVE přetoky).\n\n**Jednotka:** kW\n**Přepočet na kWh:** hodnota ÷ 4\n**Platný status:** `W`"
+          }
+        }
+      ]
+    },
+    {
+      "name": "A/B – Jalová energie",
+      "description": "Profily jalové energie pro typ A a B.\n\nPreferuj kWh profily (IKC2, IMQ2). Fallback na kW profily (IKC1, IMC1) u starších měřičů.",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "var df = pm.collectionVariables.get('date_from');",
+              "var dt = pm.collectionVariables.get('date_to');",
+              "var p = df.split('-');",
+              "var prev = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]) - 1);",
+              "var py = prev.getFullYear();",
+              "var pmo = String(prev.getMonth() + 1).padStart(2, '0');",
+              "var pd = String(prev.getDate()).padStart(2, '0');",
+              "pm.collectionVariables.set('_from_excl', py + '-' + pmo + '-' + pd + 'T23:45:00.000');",
+              "pm.collectionVariables.set('_to_incl', dt + 'T23:59:00.000');"
+            ]
+          }
+        }
+      ],
+      "item": [
+        {
+          "name": "7a. IKC2 – Jalová spotřeba (kVAr, preferováno)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": {
+              "raw": "https://data.distribuce24.cz/rest/spotreby?ean={{ean}}&profile=IKC2&from={{_from_excl}}&to={{_to_incl}}&pageStart=1&pageSize=3000",
+              "protocol": "https",
+              "host": ["data", "distribuce24", "cz"],
+              "path": ["rest", "spotreby"],
+              "query": [
+                { "key": "ean",       "value": "{{ean}}" },
+                { "key": "profile",   "value": "IKC2" },
+                { "key": "from",      "value": "{{_from_excl}}" },
+                { "key": "to",        "value": "{{_to_incl}}" },
+                { "key": "pageStart", "value": "1" },
+                { "key": "pageSize",  "value": "3000" }
+              ]
+            },
+            "description": "Jalová spotřeba při odběru ze sítě – preferovaný profil.\n\n**Jednotka:** kVAr\n**Přepočet na kVArh:** hodnota ÷ 4\n**Platný status:** `W`"
+          }
+        },
+        {
+          "name": "7b. IKC1 – Jalová spotřeba (kVAr, starší fallback)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": {
+              "raw": "https://data.distribuce24.cz/rest/spotreby?ean={{ean}}&profile=IKC1&from={{_from_excl}}&to={{_to_incl}}&pageStart=1&pageSize=3000",
+              "protocol": "https",
+              "host": ["data", "distribuce24", "cz"],
+              "path": ["rest", "spotreby"],
+              "query": [
+                { "key": "ean",       "value": "{{ean}}" },
+                { "key": "profile",   "value": "IKC1" },
+                { "key": "from",      "value": "{{_from_excl}}" },
+                { "key": "to",        "value": "{{_to_incl}}" },
+                { "key": "pageStart", "value": "1" },
+                { "key": "pageSize",  "value": "3000" }
+              ]
+            },
+            "description": "Jalová spotřeba při odběru ze sítě – starší profil, fallback pokud IKC2 není dostupné.\n\n**Jednotka:** kVAr\n**Přepočet na kVArh:** hodnota ÷ 4\n**Platný status:** `W`"
+          }
+        },
+        {
+          "name": "7c. IMQ2 – Jalová dodávka (kVArh, preferováno)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": {
+              "raw": "https://data.distribuce24.cz/rest/spotreby?ean={{ean}}&profile=IMQ2&from={{_from_excl}}&to={{_to_incl}}&pageStart=1&pageSize=3000",
+              "protocol": "https",
+              "host": ["data", "distribuce24", "cz"],
+              "path": ["rest", "spotreby"],
+              "query": [
+                { "key": "ean",       "value": "{{ean}}" },
+                { "key": "profile",   "value": "IMQ2" },
+                { "key": "from",      "value": "{{_from_excl}}" },
+                { "key": "to",        "value": "{{_to_incl}}" },
+                { "key": "pageStart", "value": "1" },
+                { "key": "pageSize",  "value": "3000" }
+              ]
+            },
+            "description": "Jalová dodávka při odběru ze sítě – preferovaný kWh profil.\n\n**Jednotka:** kVArh za interval\n**Platný status:** `W`"
+          }
+        },
+        {
+          "name": "7d. IMC1 – Jalová dodávka (kVAr, fallback)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": {
+              "raw": "https://data.distribuce24.cz/rest/spotreby?ean={{ean}}&profile=IMC1&from={{_from_excl}}&to={{_to_incl}}&pageStart=1&pageSize=3000",
+              "protocol": "https",
+              "host": ["data", "distribuce24", "cz"],
+              "path": ["rest", "spotreby"],
+              "query": [
+                { "key": "ean",       "value": "{{ean}}" },
+                { "key": "profile",   "value": "IMC1" },
+                { "key": "from",      "value": "{{_from_excl}}" },
+                { "key": "to",        "value": "{{_to_incl}}" },
+                { "key": "pageStart", "value": "1" },
+                { "key": "pageSize",  "value": "3000" }
+              ]
+            },
+            "description": "Jalová dodávka při odběru ze sítě – starší kW profil, fallback pokud IMQ2 není dostupné.\n\n**Jednotka:** kVAr\n**Přepočet na kVArh:** hodnota ÷ 4\n**Platný status:** `W`"
+          }
+        }
+      ]
+    },
+    {
+      "name": "C1 – Profily",
+      "description": "Profily pro typ měřiče C1 (průmyslový, čtvrthodinové kWh hodnoty).\n\n**Poznámka k výrobě:** Pro EAN bez výrobny vrátí API pro DSQC identická data jako pro DCQC (API zrcadlí spotřebu). Porovnej oba profily pro detekci.",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "var df = pm.collectionVariables.get('date_from');",
+              "var dt = pm.collectionVariables.get('date_to');",
+              "var p = df.split('-');",
+              "var prev = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]) - 1);",
+              "var py = prev.getFullYear();",
+              "var pmo = String(prev.getMonth() + 1).padStart(2, '0');",
+              "var pd = String(prev.getDate()).padStart(2, '0');",
+              "pm.collectionVariables.set('_from_excl', py + '-' + pmo + '-' + pd + 'T23:45:00.000');",
+              "pm.collectionVariables.set('_to_incl', dt + 'T23:59:00.000');"
+            ]
+          }
+        }
+      ],
+      "item": [
+        {
+          "name": "8a. DCQC – Spotřeba ze sítě (kWh)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": {
+              "raw": "https://data.distribuce24.cz/rest/spotreby?ean={{ean}}&profile=DCQC&from={{_from_excl}}&to={{_to_incl}}&pageStart=1&pageSize=3000",
+              "protocol": "https",
+              "host": ["data", "distribuce24", "cz"],
+              "path": ["rest", "spotreby"],
+              "query": [
+                { "key": "ean",       "value": "{{ean}}" },
+                { "key": "profile",   "value": "DCQC" },
+                { "key": "from",      "value": "{{_from_excl}}" },
+                { "key": "to",        "value": "{{_to_incl}}" },
+                { "key": "pageStart", "value": "1" },
+                { "key": "pageSize",  "value": "3000" }
+              ]
+            },
+            "description": "Spotřeba energie odebrané ze sítě – C1 (průmyslový měřič).\n\n**Jednotka:** kWh za 15minutový interval\n**Platný status:** `W`"
+          }
+        },
+        {
+          "name": "8b. DSQC – Dodávka do sítě / FVE přetoky (kWh)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": {
+              "raw": "https://data.distribuce24.cz/rest/spotreby?ean={{ean}}&profile=DSQC&from={{_from_excl}}&to={{_to_incl}}&pageStart=1&pageSize=3000",
+              "protocol": "https",
+              "host": ["data", "distribuce24", "cz"],
+              "path": ["rest", "spotreby"],
+              "query": [
+                { "key": "ean",       "value": "{{ean}}" },
+                { "key": "profile",   "value": "DSQC" },
+                { "key": "from",      "value": "{{_from_excl}}" },
+                { "key": "to",        "value": "{{_to_incl}}" },
+                { "key": "pageStart", "value": "1" },
+                { "key": "pageSize",  "value": "3000" }
+              ]
+            },
+            "description": "Energie dodávky do sítě (FVE přetoky) – C1.\n\n**Jednotka:** kWh za 15minutový interval\n**Platný status:** `W`\n**Pozor:** Pro EAN bez výrobny API vrátí identická data jako DCQC (zrcadlení). Porovnej s DCQC pro ověření."
+          }
+        },
+        {
+          "name": "8c. DCQS – Sdílení energie – obchodní (kWh)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": {
+              "raw": "https://data.distribuce24.cz/rest/spotreby?ean={{ean}}&profile=DCQS&from={{_from_excl}}&to={{_to_incl}}&pageStart=1&pageSize=3000",
+              "protocol": "https",
+              "host": ["data", "distribuce24", "cz"],
+              "path": ["rest", "spotreby"],
+              "query": [
+                { "key": "ean",       "value": "{{ean}}" },
+                { "key": "profile",   "value": "DCQS" },
+                { "key": "from",      "value": "{{_from_excl}}" },
+                { "key": "to",        "value": "{{_to_incl}}" },
+                { "key": "pageStart", "value": "1" },
+                { "key": "pageSize",  "value": "3000" }
+              ]
+            },
+            "description": "Spotřeba energie pokrytá sdílením – obchodní část – C1.\n\n**Jednotka:** kWh za 15minutový interval\n**Platný status:** `W`\n**Dostupnost:** Pouze pro EAN zapojené do sdílení energie."
+          }
+        },
+        {
+          "name": "8d. DCQD – Sdílení energie – distribuční (kWh)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": {
+              "raw": "https://data.distribuce24.cz/rest/spotreby?ean={{ean}}&profile=DCQD&from={{_from_excl}}&to={{_to_incl}}&pageStart=1&pageSize=3000",
+              "protocol": "https",
+              "host": ["data", "distribuce24", "cz"],
+              "path": ["rest", "spotreby"],
+              "query": [
+                { "key": "ean",       "value": "{{ean}}" },
+                { "key": "profile",   "value": "DCQD" },
+                { "key": "from",      "value": "{{_from_excl}}" },
+                { "key": "to",        "value": "{{_to_incl}}" },
+                { "key": "pageStart", "value": "1" },
+                { "key": "pageSize",  "value": "3000" }
+              ]
+            },
+            "description": "Spotřeba energie pokrytá sdílením – distribuční část – C1.\n\n**Jednotka:** kWh za 15minutový interval\n**Platný status:** `W`\n**Dostupnost:** Pouze pro EAN zapojené do sdílení energie."
+          }
+        },
+        {
+          "name": "8e. DSQS – Dodávka ponížená sdílením (kWh)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": {
+              "raw": "https://data.distribuce24.cz/rest/spotreby?ean={{ean}}&profile=DSQS&from={{_from_excl}}&to={{_to_incl}}&pageStart=1&pageSize=3000",
+              "protocol": "https",
+              "host": ["data", "distribuce24", "cz"],
+              "path": ["rest", "spotreby"],
+              "query": [
+                { "key": "ean",       "value": "{{ean}}" },
+                { "key": "profile",   "value": "DSQS" },
+                { "key": "from",      "value": "{{_from_excl}}" },
+                { "key": "to",        "value": "{{_to_incl}}" },
+                { "key": "pageStart", "value": "1" },
+                { "key": "pageSize",  "value": "3000" }
+              ]
+            },
+            "description": "Energie dodávky do sítě ponížená o objem přidělený sdílení – C1.\n\n**Jednotka:** kWh za 15minutový interval\n**Platný status:** `W`\n**Dostupnost:** Pouze pro výrobní EAN zapojená do sdílení energie."
+          }
+        }
+      ]
+    }
+  ]
+}

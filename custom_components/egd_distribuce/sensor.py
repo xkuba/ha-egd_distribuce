@@ -18,7 +18,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import CONF_EAN, COORDINATOR_KEY, DOMAIN
+from .const import CONF_EAN, COORDINATOR_KEY, DOMAIN, METER_TYPE_AB, METER_TYPE_C1
 from .coordinator import EgdCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -26,13 +26,15 @@ _LOGGER = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class EgdSensorEntityDescription(SensorEntityDescription):
-    """Popis senzoru EGD včetně klíče pro statistiku."""
+    """Popis senzoru EGD včetně klíče pro statistiku a omezení dle typu měřiče."""
 
     data_key: str = ""
+    # None = platí pro všechny typy; jinak frozenset povolených typů
+    meter_types: frozenset[str] | None = None
 
 
-# Definice všech senzorů
-SENSOR_DESCRIPTIONS: tuple[EgdSensorEntityDescription, ...] = (
+# Senzory společné pro všechny typy měřičů
+_SENSORS_ALL: tuple[EgdSensorEntityDescription, ...] = (
     EgdSensorEntityDescription(
         key="consumption",
         data_key="consumption_kwh",
@@ -53,6 +55,44 @@ SENSOR_DESCRIPTIONS: tuple[EgdSensorEntityDescription, ...] = (
         icon="mdi:transmission-tower-export",
         suggested_display_precision=2,
     ),
+)
+
+# Senzory pro sdílení energie a dodávku poníženou sdílením (A/B i C1)
+_SENSORS_SHARING: tuple[EgdSensorEntityDescription, ...] = (
+    EgdSensorEntityDescription(
+        key="sharing_commercial",
+        data_key="sharing_commercial_kwh",
+        name="Sdílení energie – obchodní",
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        icon="mdi:account-group",
+        suggested_display_precision=2,
+    ),
+    EgdSensorEntityDescription(
+        key="sharing_distribution",
+        data_key="sharing_distribution_kwh",
+        name="Sdílení energie – distribuční",
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        icon="mdi:transmission-tower",
+        suggested_display_precision=2,
+    ),
+    EgdSensorEntityDescription(
+        key="production_sharing",
+        data_key="production_sharing_kwh",
+        name="Dodávka ponížená v rámci sdílení",
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        icon="mdi:transmission-tower-export",
+        suggested_display_precision=2,
+    ),
+)
+
+# Senzory jen pro A/B (jalová energie – profily IKC1, IMC1)
+_SENSORS_AB: tuple[EgdSensorEntityDescription, ...] = (
     EgdSensorEntityDescription(
         key="reactive_consumption",
         data_key="reactive_consumption_kvarh",
@@ -62,6 +102,7 @@ SENSOR_DESCRIPTIONS: tuple[EgdSensorEntityDescription, ...] = (
         native_unit_of_measurement="kvarh",
         icon="mdi:lightning-bolt",
         suggested_display_precision=2,
+        meter_types=frozenset({METER_TYPE_AB}),
     ),
     EgdSensorEntityDescription(
         key="reactive_production",
@@ -72,7 +113,14 @@ SENSOR_DESCRIPTIONS: tuple[EgdSensorEntityDescription, ...] = (
         native_unit_of_measurement="kvarh",
         icon="mdi:lightning-bolt-outline",
         suggested_display_precision=2,
+        meter_types=frozenset({METER_TYPE_AB}),
     ),
+)
+
+SENSOR_DESCRIPTIONS: tuple[EgdSensorEntityDescription, ...] = (
+    *_SENSORS_ALL,
+    *_SENSORS_SHARING,
+    *_SENSORS_AB,
 )
 
 
@@ -81,13 +129,15 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Nastaví senzory pro daný config entry."""
+    """Nastaví senzory pro daný config entry – pouze senzory platné pro typ měřiče."""
     coordinator: EgdCoordinator = hass.data[DOMAIN][entry.entry_id][COORDINATOR_KEY]
     ean = entry.data[CONF_EAN]
+    meter_type = coordinator.meter_type
 
     entities = [
-        EgdSensor(coordinator, description, ean, entry.entry_id)
-        for description in SENSOR_DESCRIPTIONS
+        EgdSensor(coordinator, desc, ean, entry.entry_id)
+        for desc in SENSOR_DESCRIPTIONS
+        if desc.meter_types is None or meter_type in desc.meter_types
     ]
     async_add_entities(entities)
 

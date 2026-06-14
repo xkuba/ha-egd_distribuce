@@ -43,6 +43,21 @@ STAT_DEFINITIONS = {
         UnitOfEnergy.KILO_WATT_HOUR,
         "Dodávka do sítě (FVE přetoky)",
     ),
+    "sharing_commercial_kwh": (
+        "sharing_commercial",
+        UnitOfEnergy.KILO_WATT_HOUR,
+        "Sdílení energie – obchodní",
+    ),
+    "sharing_distribution_kwh": (
+        "sharing_distribution",
+        UnitOfEnergy.KILO_WATT_HOUR,
+        "Sdílení energie – distribuční",
+    ),
+    "production_sharing_kwh": (
+        "production_sharing",
+        UnitOfEnergy.KILO_WATT_HOUR,
+        "Dodávka ponížená v rámci sdílení",
+    ),
     "reactive_consumption_kvarh": (
         "reactive_consumption",
         "kvarh",
@@ -71,7 +86,7 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.ean = ean
         self.entry_id = entry_id
         self._entry = entry
-        self._initial_sync_done = False
+        self._initial_sync_done = False  # Příznak platný jen v rámci jednoho běhu HA
         self._latest_values: dict[str, float] = {}
         self._latest_dates: dict[str, date] = {}
 
@@ -100,7 +115,10 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         if now.hour >= update_hour:
             yesterday = date.today() - timedelta(days=1)
-            await self._sync_range(yesterday, yesterday)
+            # Stáhni jen pokud ještě nemáme včerejší data
+            last_date = await self._get_last_recorded_date()
+            if last_date is None or last_date < yesterday:
+                await self._sync_range(yesterday, yesterday)
 
         return self._build_state()
 
@@ -125,16 +143,47 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # Synchronizace dat
     # ------------------------------------------------------------------
 
+    async def _get_last_recorded_date(self) -> date | None:
+        """Vrátí datum posledního záznamu spotřeby v recorderu (None = žádná data).
+
+        Používá "sum" jako typ – start je vždy součástí výsledku bez ohledu na typ.
+        """
+        statistic_id = f"{DOMAIN}:{self.ean}_consumption"
+        last_stats = await get_instance(self.hass).async_add_executor_job(
+            lambda: get_last_statistics(self.hass, 1, statistic_id, True, {"sum"})
+        )
+        if last_stats and statistic_id in last_stats:
+            start = last_stats[statistic_id][0].get("start")
+            if start:
+                local_tz = dt_util.get_time_zone(self.hass.config.time_zone)
+                return datetime.fromtimestamp(start, tz=local_tz).date()
+        return None
+
     async def _sync_history(self, days: int) -> None:
-        """Stáhne historii za posledních `days` dní."""
+        """Stáhne pouze chybějící historická data (nepřepisuje existující záznamy).
+
+        Na základě posledního záznamu v recorderu určí od kdy data chybí.
+        Díky tomu je bezpečné volat po každém restartu HA – stáhne jen nové dny.
+        """
         today = date.today()
-        date_from = today - timedelta(days=days)
+        target_from = today - timedelta(days=days)
         date_to = today - timedelta(days=1)
+
+        last_date = await self._get_last_recorded_date()
+        if last_date is None:
+            date_from = target_from
+        elif last_date >= date_to:
+            _LOGGER.info("EGD: historická data jsou kompletní (poslední: %s), přeskakuji", last_date)
+            return
+        else:
+            date_from = last_date + timedelta(days=1)
+
         _LOGGER.info(
-            "EGD: počáteční synchronizace %s – %s (%d dní)",
+            "EGD: synchronizuji historii %s – %s (%d dní, target od %s)",
             date_from,
             date_to,
-            days,
+            (date_to - date_from).days + 1,
+            target_from,
         )
         await self._sync_range(date_from, date_to)
 

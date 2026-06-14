@@ -6,17 +6,41 @@ Custom integrace pro stahování naměřených dat z EG.D Distribuce přes OpenA
 
 ## Co integrace umí
 
+### Spotřeba a výroba
 - ✅ Denní spotřeba ze sítě (kWh)
 - ✅ Denní dodávka do sítě – FVE přetoky (kWh)
 - ✅ Jalová spotřeba a dodávka (kVArh) – pouze typ A/B
+
+### Sdílení energie (komunitní FVE)
+- ✅ Sdílení energie – obchodní část (kWh)
+- ✅ Sdílení energie – distribuční část (kWh)
+- ✅ Dodávka ponížená v rámci sdílení (kWh)
+
+### Integrace do HA
 - ✅ Nastavení přes GUI (Config Flow) – žádný YAML
 - ✅ Automatická detekce typu měřiče (A, B, C1) z API
+- ✅ Automatická detekce EAN bez výrobny (C1: mirror detection DSQC vs DCQC)
 - ✅ Zařízení (Device) v HA UI – vše pohromadě pod jedním EAN
 - ✅ Správné historické timestampy – data se zapíší do správného dne, ne dne stažení
 - ✅ Napojení na **Energy Dashboard** (Přehled energií)
-- ✅ Automatický fallback ICC1/ISC1 → ICQ2/ISQ2 (kWh od 1.7.2024) pro typ A/B
+- ✅ Automatický fallback ICC1 → ICQ2 (kWh od 1.7.2024) pro typ A/B
+- ✅ Smart history sync – při restartu HA se stahují jen chybějící dny, ne celá historie
 - ✅ Počáteční synchronizace konfigurovatelné zpětné historie při prvním spuštění
 - ✅ Volitelné testovací prostředí (test.distribuce24.cz)
+
+## Senzory
+
+| Senzor | Typ A/B | Typ C1 | Profil API |
+|---|:---:|:---:|---|
+| Spotřeba ze sítě | ✓ | ✓ | ICQ2 / ICC1 / DCQC |
+| Dodávka do sítě (FVE) | ✓ | ✓ | ISQ2 / ISC1 / DSQC |
+| Sdílení energie – obchodní | ✓ | ✓ | ICQS / DCQS |
+| Sdílení energie – distribuční | ✓ | ✓ | ICQD / DCQD |
+| Dodávka ponížená sdílením | ✓ | ✓ | ISQS / DSQS |
+| Jalová spotřeba | ✓ | – | IKC2 / IKC1 |
+| Jalová dodávka | ✓ | – | IMQ2 / IMC1 |
+
+Senzory sdílení a dodávky ponížené sdílením se zobrazí jen pokud API pro daný EAN tato data poskytuje (EAN je zapojen do skupiny sdílení energie).
 
 ## Požadavky
 
@@ -56,21 +80,46 @@ Po přidání integrace lze upravit v **Nastavení → Zařízení a služby →
 | Parametr | Výchozí | Popis |
 |---|---|---|
 | Hodina stahování | 17 | Data se stáhnou při prvním ticku v nebo po zadané hodině |
-| Datum počátku historie | 30 dní zpět | Od tohoto data se při příštím startu stáhne celá historie |
+| Datum počátku historie | 30 dní zpět | Od tohoto data se stáhne zpětná historie při prvním spuštění |
 
 ## Napojení na Energy Dashboard
 
-1. **Nastavení → Přehled energií → Spotřeba elektřiny ze sítě**
-2. Vyber senzor `EG.D Distribuce {EAN} Spotřeba ze sítě`
-3. Pro FVE: **Zpětné přetoky do sítě** → `EG.D Distribuce {EAN} Dodávka do sítě (FVE)`
+Integrace zapisuje data jako **external statistics** – ty nejsou automaticky na dashboardu, je třeba je přidat ručně.
+
+1. **Nastavení → Přehled energií → Spotřeba elektřiny ze sítě → Přidat spotřebu**
+2. Zadej `statistic_id` (viditelné jako atribut senzoru nebo v Vývojářské nástroje → Statistiky):
+
+| Měřená veličina | statistic_id |
+|---|---|
+| Spotřeba ze sítě | `egd_distribuce:<EAN>_consumption` |
+| Dodávka do sítě (FVE) | `egd_distribuce:<EAN>_production` |
+| Sdílení – obchodní | `egd_distribuce:<EAN>_sharing_commercial` |
+| Sdílení – distribuční | `egd_distribuce:<EAN>_sharing_distribution` |
+| Dodávka ponížená sdílením | `egd_distribuce:<EAN>_production_sharing` |
+
+Pro zobrazení historického grafu v Lovelace (statistics-graph karta):
+```yaml
+type: statistics-graph
+entities:
+  - egd_distribuce:<EAN>_consumption
+period: day
+stat_types:
+  - sum
+```
+
+## Smazání a opětovné stažení dat
+
+Pokud potřebuješ data vymazat a stáhnout znovu:
+1. **Vývojářské nástroje → Statistiky** → smaž záznamy s prefixem `egd_distribuce`
+2. **Nastavení → Zařízení a služby → EG.D Distribuce → ⋮ → Znovu načíst**
 
 ## Technické poznámky
 
-- Data jsou aktualizována jednou denně (výchozí: ~17:03, konfigurovatelné)
+- Data jsou aktualizována jednou denně (výchozí: ~17:00, konfigurovatelné)
+- Smart sync: při každém startu HA se stáhnou jen dny, které v recorderu chybí – nedochází k přepisování existujících dat
 - Token je platný do půlnoci – integrace ho automaticky obnovuje každý den
-- Max. 3000 záznamů na volání = cca 1 měsíc čtvrthodinových dat
-- Data se zapisují přes `recorder.import_statistics` se správným timestampem
 - Platný status hodnoty je `W` pro všechny typy měřičů (dle API dokumentace 2026-05)
+- Hranice API `/rest/spotreby` je exkluzivní pro `from` – integrace to kompenzuje automaticky
 
 ## Dokumentace
 

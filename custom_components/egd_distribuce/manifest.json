@@ -1,10 +1,10 @@
 {
   "domain": "egd_distribuce",
   "name": "EG.D Distribuce",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "documentation": "https://github.com/xkuba/ha-egd_distribuce",
   "issue_tracker": "https://github.com/xkuba/ha-egd_distribuce/issues",
-  "dependencies": [],
+  "dependencies": ["recorder"],
   "codeowners": [],
   "requirements": [],
   "iot_class": "cloud_polling",
