@@ -111,6 +111,10 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         update_hour = self._entry.options.get(CONF_UPDATE_HOUR, DEFAULT_UPDATE_HOUR)
 
         if not self._initial_sync_done:
+            # Nejdřív stav z recorderu – statistiky přežijí smazání integrace,
+            # takže po znovupřidání se stahování přeskočí a jinak bychom zůstali
+            # bez hodnot pro senzory i bez informace o dostupných profilech.
+            await self._load_state_from_recorder()
             days = self._resolve_history_days()
             await self._sync_history(days)
             self._initial_sync_done = True
@@ -160,6 +164,49 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if start:
                 return datetime.fromtimestamp(start, tz=dt_util.DEFAULT_TIME_ZONE).date()
         return None
+
+    async def _load_state_from_recorder(self) -> None:
+        """Načte poslední uložené hodnoty a dostupné profily z recorderu.
+
+        Nevolá API. Slouží jako výchozí stav pro případ, kdy je historie už
+        kompletní a stahování se přeskočí – bez toho by senzory zůstaly
+        „neznámé" a nešlo by rozhodnout, které profily nemají data.
+        """
+        found: set[str] = set()
+
+        for data_key, (stat_suffix, _unit, _name) in STAT_DEFINITIONS.items():
+            statistic_id = f"{DOMAIN}:{self.ean}_{stat_suffix}"
+            stats = await get_instance(self.hass).async_add_executor_job(
+                lambda sid=statistic_id: get_last_statistics(
+                    self.hass, 1, sid, True, {"state", "sum"}
+                )
+            )
+            if not stats or statistic_id not in stats:
+                continue
+
+            row = stats[statistic_id][0]
+            found.add(data_key)
+
+            state = row.get("state")
+            if state is not None:
+                self._latest_values[data_key] = round(float(state), 4)
+
+            start = row.get("start")
+            if start:
+                self._latest_dates[data_key] = datetime.fromtimestamp(
+                    start, tz=dt_util.DEFAULT_TIME_ZONE
+                ).date()
+
+        # Dostupnost bereme jen když v recorderu je spotřeba – jinak je zřejmé,
+        # že se zatím nic nestáhlo a nemáme co vyhodnocovat.
+        if "consumption_kwh" in found:
+            if self.available_data_keys is None:
+                self.available_data_keys = found
+            else:
+                self.available_data_keys |= found
+            _LOGGER.debug(
+                "EGD: z recorderu načteny profily %s", sorted(found)
+            )
 
     async def _sync_history(self, days: int) -> None:
         """Stáhne pouze chybějící historická data (nepřepisuje existující záznamy).
