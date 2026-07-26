@@ -42,6 +42,11 @@ _LOGGER = logging.getLogger(__name__)
 # Datum zavedení kWh profilů pro typ A/B
 KWH_PROFILES_SINCE = date(2024, 7, 1)
 
+# Počet záznamů na jednu stránku API (96 čtvrthodin = 1 den → 3000 ≈ 31 dní)
+PAGE_SIZE = 3000
+# Pojistka proti nekonečné smyčce (≈ 10 let čtvrthodinových dat)
+MAX_RECORDS = 400_000
+
 
 class EgdApiError(Exception):
     """Obecná chyba API."""
@@ -123,14 +128,15 @@ class EgdApi:
     # Načtení dat pro jeden profil – jednotný endpoint pro A/B i C1
     # ------------------------------------------------------------------
 
-    async def _get_profile_data(
+    async def _request_page(
         self,
         ean: str,
         profile: str,
         from_str: str,
         to_str: str,
+        page_start: int,
     ) -> list[dict[str, Any]]:
-        """Provede jedno GET volání na /rest/spotreby pro zadaný přesný rozsah."""
+        """Provede jedno GET volání na /rest/spotreby pro zadaný rozsah a offset."""
         token = await self._ensure_token()
         headers = {"Authorization": f"Bearer {token}"}
 
@@ -139,8 +145,8 @@ class EgdApi:
             "profile": profile,
             "from": from_str,
             "to": to_str,
-            "pageStart": "1",
-            "pageSize": "3000",
+            "pageStart": str(page_start),
+            "pageSize": str(PAGE_SIZE),
         }
 
         _LOGGER.debug("EGD: GET %s params=%s", self._data_url, params)
@@ -183,6 +189,40 @@ class EgdApi:
         if isinstance(data, dict):
             return data.get("data", [])
         return []
+
+    async def _get_profile_data(
+        self,
+        ean: str,
+        profile: str,
+        from_str: str,
+        to_str: str,
+    ) -> list[dict[str, Any]]:
+        """Stáhne všechny záznamy pro zadaný rozsah včetně stránkování.
+
+        API omezuje počet vrácených záznamů na pageSize a v odpovědi nijak
+        nesignalizuje, že existují další – pole "total" je jen počet záznamů
+        na aktuální stránce. Proto čteme dál, dokud stránka přijde plná.
+        Parametr pageStart je 1-based offset záznamu, nikoli číslo stránky.
+        """
+        records: list[dict[str, Any]] = []
+        page_start = 1
+
+        while True:
+            batch = await self._request_page(ean, profile, from_str, to_str, page_start)
+            records.extend(batch)
+
+            if len(batch) < PAGE_SIZE:
+                break
+
+            page_start += PAGE_SIZE
+            if page_start > MAX_RECORDS:
+                _LOGGER.warning(
+                    "EGD: profil %s (%s–%s) překročil limit %d záznamů, data mohou být neúplná",
+                    profile, from_str, to_str, MAX_RECORDS,
+                )
+                break
+
+        return records
 
     async def _fetch_profile(
         self,
