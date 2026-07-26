@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, tzinfo
 from typing import Any
 
 import aiohttp
@@ -73,11 +73,16 @@ class EgdApi:
         client_id: str,
         client_secret: str,
         test_mode: bool = False,
+        timezone: tzinfo | None = None,
     ) -> None:
         self._session = session
         self._client_id = client_id
         self._client_secret = client_secret
         self._test_mode = test_mode
+        # Zóna pro zařazení čtvrthodin do dnů – musí odpovídat zóně, pod kterou
+        # coordinator zapisuje statistiky (hass.config.time_zone). Bez ní by se
+        # použila zóna hostitele a hodnoty by mohly spadnout do jiného dne.
+        self._timezone = timezone
         self._token: str | None = None
         self._token_date: date | None = None
         # URL volíme dle režimu
@@ -286,7 +291,7 @@ class EgdApi:
             ts_str = rec.get("timestamp", "")
             try:
                 dt_utc = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                dt_local = dt_utc.astimezone()
+                dt_local = dt_utc.astimezone(self._timezone)
                 day = dt_local.date()
             except (ValueError, TypeError):
                 continue

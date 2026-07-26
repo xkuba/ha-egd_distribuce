@@ -13,7 +13,8 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfEnergy
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -129,17 +130,73 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Nastaví senzory pro daný config entry – pouze senzory platné pro typ měřiče."""
+    """Nastaví senzory pro daný config entry – pouze senzory platné pro typ měřiče.
+
+    Profily, pro které odběrné místo nemá data (typicky výroba a sdílení),
+    se založí jako zakázané (disabled) – uživatel je může kdykoli povolit ručně.
+    """
     coordinator: EgdCoordinator = hass.data[DOMAIN][entry.entry_id][COORDINATOR_KEY]
     ean = entry.data[CONF_EAN]
     meter_type = coordinator.meter_type
+    available = coordinator.available_data_keys
 
     entities = [
-        EgdSensor(coordinator, desc, ean, entry.entry_id)
+        EgdSensor(
+            coordinator,
+            desc,
+            ean,
+            entry.entry_id,
+            # available je None, dokud neproběhla synchronizace – pak nic nezakazujeme
+            enabled_default=available is None or desc.data_key in available,
+        )
         for desc in SENSOR_DESCRIPTIONS
         if desc.meter_types is None or meter_type in desc.meter_types
     ]
     async_add_entities(entities)
+
+    if available is not None:
+        _sync_registry_disabled_state(hass, entities, available)
+
+
+@callback
+def _sync_registry_disabled_state(
+    hass: HomeAssistant,
+    entities: list[EgdSensor],
+    available: set[str],
+) -> None:
+    """Srovná stav již registrovaných entit s aktuální dostupností profilů.
+
+    entity_registry_enabled_default se uplatní jen při prvním založení entity,
+    proto u existujících entit upravíme registr přímo. Saháme výhradně na entity,
+    které jsme zakázali sami (disabled_by INTEGRATION) – ruční volbu uživatele
+    (disabled_by USER) neměníme.
+    """
+    registry = er.async_get(hass)
+
+    for entity in entities:
+        entity_id = registry.async_get_entity_id(
+            "sensor", DOMAIN, entity.unique_id
+        )
+        if entity_id is None:
+            continue
+
+        registry_entry = registry.async_get(entity_id)
+        if registry_entry is None:
+            continue
+
+        should_disable = entity.entity_description.data_key not in available
+
+        if should_disable and registry_entry.disabled_by is None:
+            _LOGGER.debug("EGD: zakazuji senzor %s – profil nemá data", entity_id)
+            registry.async_update_entity(
+                entity_id, disabled_by=er.RegistryEntryDisabler.INTEGRATION
+            )
+        elif (
+            not should_disable
+            and registry_entry.disabled_by is er.RegistryEntryDisabler.INTEGRATION
+        ):
+            _LOGGER.debug("EGD: povoluji senzor %s – profil má nově data", entity_id)
+            registry.async_update_entity(entity_id, disabled_by=None)
 
 
 class EgdSensor(CoordinatorEntity[EgdCoordinator], SensorEntity):
@@ -154,6 +211,7 @@ class EgdSensor(CoordinatorEntity[EgdCoordinator], SensorEntity):
         description: EgdSensorEntityDescription,
         ean: str,
         entry_id: str,
+        enabled_default: bool = True,
     ) -> None:
         super().__init__(coordinator)
         self.entity_description = description
@@ -162,6 +220,9 @@ class EgdSensor(CoordinatorEntity[EgdCoordinator], SensorEntity):
 
         # Unikátní ID = EAN + typ senzoru
         self._attr_unique_id = f"{ean}_{description.key}"
+
+        # Profily bez dat (výroba, sdílení) zakládáme rovnou jako zakázané
+        self._attr_entity_registry_enabled_default = enabled_default
 
         # Senzor je součástí device = jedno zařízení na EAN
         meter_label = f"Typ měření {coordinator.meter_type}"

@@ -89,6 +89,9 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._initial_sync_done = False  # Příznak platný jen v rámci jednoho běhu HA
         self._latest_values: dict[str, float] = {}
         self._latest_dates: dict[str, date] = {}
+        # Klíče dat, pro které API vrátilo alespoň jednu hodnotu.
+        # None = zatím nezjištěno (synchronizace neproběhla) → senzory necháme povolené.
+        self.available_data_keys: set[str] | None = None
 
         super().__init__(
             hass,
@@ -155,8 +158,7 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if last_stats and statistic_id in last_stats:
             start = last_stats[statistic_id][0].get("start")
             if start:
-                local_tz = dt_util.get_time_zone(self.hass.config.time_zone)
-                return datetime.fromtimestamp(start, tz=local_tz).date()
+                return datetime.fromtimestamp(start, tz=dt_util.DEFAULT_TIME_ZONE).date()
         return None
 
     async def _sync_history(self, days: int) -> None:
@@ -202,6 +204,17 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 last_day = max(daily.keys())
                 self._latest_values[data_key] = round(daily[last_day], 4)
                 self._latest_dates[data_key] = last_day
+
+        # Zjištění dostupných profilů – jen pokud stahování evidentně fungovalo
+        # (spotřeba má data). Sjednocujeme, aby profil, který jednou data vrátil,
+        # nezmizel kvůli dni bez hodnot.
+        if daily_data.get("consumption_kwh"):
+            found = {key for key, daily in daily_data.items() if daily}
+            if self.available_data_keys is None:
+                self.available_data_keys = found
+            else:
+                self.available_data_keys |= found
+            _LOGGER.debug("EGD: dostupné profily: %s", sorted(self.available_data_keys))
 
         # Zapíšeme každý datový typ jako statistiku
         for data_key, (stat_suffix, unit, name) in STAT_DEFINITIONS.items():
@@ -257,9 +270,11 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             value = round(daily[day], 4)
             running_sum += value
 
-            # Timestamp = začátek dne v lokálním timezone
-            local_tz = dt_util.get_time_zone(self.hass.config.time_zone)
-            dt_start = datetime(day.year, day.month, day.day, 0, 0, 0, tzinfo=local_tz)
+            # Timestamp = začátek dne v lokálním timezone (stejná zóna, pod kterou
+            # api.py zařazuje čtvrthodiny do dnů – jinak by hodnoty spadly do jiného dne)
+            dt_start = datetime(
+                day.year, day.month, day.day, 0, 0, 0, tzinfo=dt_util.DEFAULT_TIME_ZONE
+            )
 
             statistics.append(
                 StatisticData(

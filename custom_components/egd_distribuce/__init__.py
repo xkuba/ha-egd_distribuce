@@ -7,6 +7,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+import homeassistant.util.dt as dt_util
 
 from .api import EgdApi
 from .const import CONF_CLIENT_ID, CONF_CLIENT_SECRET, CONF_EAN, CONF_TEST_MODE, COORDINATOR_KEY, DOMAIN
@@ -26,6 +27,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         client_id=entry.data[CONF_CLIENT_ID],
         client_secret=entry.data[CONF_CLIENT_SECRET],
         test_mode=entry.data.get(CONF_TEST_MODE, False),
+        # Stejná zóna, pod kterou coordinator zapisuje statistiky
+        timezone=dt_util.DEFAULT_TIME_ZONE,
     )
 
     coordinator = EgdCoordinator(
