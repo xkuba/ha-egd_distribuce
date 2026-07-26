@@ -123,22 +123,16 @@ class EgdApi:
     # Načtení dat pro jeden profil – jednotný endpoint pro A/B i C1
     # ------------------------------------------------------------------
 
-    async def _fetch_profile(
+    async def _get_profile_data(
         self,
         ean: str,
         profile: str,
-        date_from: date,
-        date_to: date,
+        from_str: str,
+        to_str: str,
     ) -> list[dict[str, Any]]:
-        """Stáhne čtvrthodinová data z jednotného endpointu /rest/spotreby."""
+        """Provede jedno GET volání na /rest/spotreby pro zadaný přesný rozsah."""
         token = await self._ensure_token()
         headers = {"Authorization": f"Bearer {token}"}
-
-        # API používá exkluzivní dolní mez a vrací intervaly, jejichž START < to.
-        # Aby byl zahrnut interval 00:00 prvního dne, musí from být o 15 min dřív.
-        # Aby byl zahrnut interval 23:45 posledního dne, musí to být 23:59.
-        from_str = f"{(date_from - timedelta(days=1)).isoformat()}T23:45:00.000"
-        to_str = f"{date_to.isoformat()}T23:59:00.000"
 
         params = {
             "ean": ean,
@@ -165,7 +159,7 @@ class EgdApi:
                     body = await resp.text()
                     _LOGGER.error(
                         "EGD: HTTP %s pro profil %s (%s–%s): %s",
-                        resp.status, profile, date_from, date_to, body,
+                        resp.status, profile, from_str, to_str, body,
                     )
                     try:
                         err_data = json.loads(body)
@@ -180,10 +174,43 @@ class EgdApi:
         except aiohttp.ClientError as err:
             raise EgdApiError(f"Chyba při stahování profilu {profile}: {err}") from err
 
-        if not data or not isinstance(data, list):
-            return []
+        # Produkční prostředí vrací přímo objekt {"data": [...]},
+        # testovací prostředí vrací pole [{"data": [...]}].
+        if isinstance(data, list):
+            if not data:
+                return []
+            return data[0].get("data", [])
+        if isinstance(data, dict):
+            return data.get("data", [])
+        return []
 
-        return data[0].get("data", [])
+    async def _fetch_profile(
+        self,
+        ean: str,
+        profile: str,
+        date_from: date,
+        date_to: date,
+    ) -> list[dict[str, Any]]:
+        """Stáhne čtvrthodinová data z jednotného endpointu /rest/spotreby."""
+        # API používá exkluzivní dolní mez a vrací intervaly, jejichž START < to.
+        # Aby byl zahrnut interval 00:00 prvního dne, musí from být o 15 min dřív.
+        # Aby byl zahrnut interval 23:45 posledního dne, musí to být 23:59.
+        to_str = f"{date_to.isoformat()}T23:59:00.000"
+        shifted_from_str = f"{(date_from - timedelta(days=1)).isoformat()}T23:45:00.000"
+
+        try:
+            return await self._get_profile_data(ean, profile, shifted_from_str, to_str)
+        except EgdPermissionError:
+            # Pokud den_from je úplně první den, na který má účet oprávnění,
+            # posun o 23:45 předchozího dne spadne mimo autorizované období
+            # a API vrátí tvrdou chybu (nikoli jen prázdná data). Zkusíme to
+            # znovu bez posunu – přijdeme jen o první čtvrthodinu (00:00–00:15).
+            unshifted_from_str = f"{date_from.isoformat()}T00:00:00.000"
+            _LOGGER.debug(
+                "EGD: profil %s odmítnut pro from=%s, zkouším bez posunu (from=%s)",
+                profile, shifted_from_str, unshifted_from_str,
+            )
+            return await self._get_profile_data(ean, profile, unshifted_from_str, to_str)
 
     # ------------------------------------------------------------------
     # Agregace – součet čtvrthodin za každý den

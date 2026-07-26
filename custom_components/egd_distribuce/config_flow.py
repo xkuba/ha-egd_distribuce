@@ -34,6 +34,7 @@ STEP_USER_SCHEMA = vol.Schema(
         vol.Required(CONF_CLIENT_SECRET): str,
         vol.Required(CONF_EAN): str,
         vol.Required(CONF_TEST_MODE, default=False): bool,
+        vol.Optional(CONF_HISTORY_FROM): str,
     }
 )
 
@@ -66,29 +67,44 @@ class EgdDistribuceConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            await self.async_set_unique_id(
-                user_input[CONF_EAN], raise_on_progress=False
-            )
-            self._abort_if_unique_id_configured()
+            history_from_str = user_input.get(CONF_HISTORY_FROM, "").strip()
+            if history_from_str:
+                try:
+                    date.fromisoformat(history_from_str)
+                except ValueError:
+                    errors[CONF_HISTORY_FROM] = "invalid_date"
 
-            try:
-                info = await _validate_input(self.hass, user_input)
-            except EgdAuthError:
-                errors["base"] = "invalid_auth"
-            except EgdUnsupportedMeterError:
-                errors["base"] = "unsupported_meter"
-            except EgdPermissionError:
-                errors["base"] = "invalid_ean"
-            except EgdApiError:
-                errors["base"] = "cannot_connect"
-            except Exception:  # pylint: disable=broad-except
-                _LOGGER.exception("EGD: neočekávaná chyba při validaci")
-                errors["base"] = "unknown"
-            else:
-                return self.async_create_entry(
-                    title=info["title"],
-                    data={**user_input, CONF_METER_TYPE: info[CONF_METER_TYPE]},
+            if not errors:
+                await self.async_set_unique_id(
+                    user_input[CONF_EAN], raise_on_progress=False
                 )
+                self._abort_if_unique_id_configured()
+
+                try:
+                    info = await _validate_input(self.hass, user_input)
+                except EgdAuthError:
+                    errors["base"] = "invalid_auth"
+                except EgdUnsupportedMeterError:
+                    errors["base"] = "unsupported_meter"
+                except EgdPermissionError:
+                    errors["base"] = "invalid_ean"
+                except EgdApiError:
+                    errors["base"] = "cannot_connect"
+                except Exception:  # pylint: disable=broad-except
+                    _LOGGER.exception("EGD: neočekávaná chyba při validaci")
+                    errors["base"] = "unknown"
+                else:
+                    entry_data = {
+                        k: v for k, v in user_input.items() if k != CONF_HISTORY_FROM
+                    }
+                    options = (
+                        {CONF_HISTORY_FROM: history_from_str} if history_from_str else {}
+                    )
+                    return self.async_create_entry(
+                        title=info["title"],
+                        data={**entry_data, CONF_METER_TYPE: info[CONF_METER_TYPE]},
+                        options=options,
+                    )
 
         return self.async_show_form(
             step_id="user",

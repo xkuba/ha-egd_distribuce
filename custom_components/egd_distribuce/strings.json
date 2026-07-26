@@ -8,13 +8,15 @@
           "client_id": "Client ID",
           "client_secret": "Client Secret",
           "ean": "EAN odběrného místa",
-          "test_mode": "Testovací prostředí"
+          "test_mode": "Testovací prostředí",
+          "history_from": "Datum načítání historie od (YYYY-MM-DD)"
         },
         "data_description": {
           "client_id": "Vygenerovaný Client ID z portálu Distribuce24",
           "client_secret": "Vygenerovaný Client Secret z portálu Distribuce24",
           "ean": "EAN číslo vašeho odběrného místa (18 číslic) – typ měřiče se zjistí automaticky",
-          "test_mode": "Zapněte pro testování na test.distribuce24.cz (vyžaduje testovací přihlašovací údaje)"
+          "test_mode": "Zapněte pro testování na test.distribuce24.cz (vyžaduje testovací přihlašovací údaje)",
+          "history_from": "Volitelné. Prázdné = posledních 30 dní. Lze změnit i později v Možnostech integrace."
         }
       }
     },
@@ -23,7 +25,8 @@
       "invalid_ean": "EAN nebyl nalezen – ověřte číslo nebo propojení API účtu s odběrným místem na portálu Distribuce24",
       "unsupported_meter": "Typ měřiče C4 není podporován – EGD API poskytuje data pouze pro typy A, B a C1",
       "cannot_connect": "Nelze se připojit k EG.D API",
-      "unknown": "Neočekávaná chyba, zkontrolujte log"
+      "unknown": "Neočekávaná chyba, zkontrolujte log",
+      "invalid_date": "Neplatné datum – použijte formát YYYY-MM-DD (např. 2026-06-04)"
     },
     "abort": {
       "already_configured": "Toto odběrné místo (EAN) je již nakonfigurováno"

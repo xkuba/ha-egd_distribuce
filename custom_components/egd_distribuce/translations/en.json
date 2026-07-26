@@ -8,13 +8,15 @@
           "client_id": "Client ID",
           "client_secret": "Client Secret",
           "ean": "Metering point EAN",
-          "test_mode": "Test environment"
+          "test_mode": "Test environment",
+          "history_from": "History start date (YYYY-MM-DD)"
         },
         "data_description": {
           "client_id": "Client ID generated in the Distribuce24 portal",
           "client_secret": "Client Secret generated in the Distribuce24 portal",
           "ean": "EAN number of your metering point (18 digits) – meter type is detected automatically",
-          "test_mode": "Enable to use test.distribuce24.cz (requires test credentials)"
+          "test_mode": "Enable to use test.distribuce24.cz (requires test credentials)",
+          "history_from": "Optional. Empty = last 30 days. Can also be changed later in the integration Options."
         }
       }
     },
@@ -23,7 +25,8 @@
       "invalid_ean": "EAN not found – verify the number or link the API account to the metering point in the Distribuce24 portal",
       "unsupported_meter": "Meter type C4 is not supported – EGD API provides data only for types A, B and C1",
       "cannot_connect": "Unable to connect to the EG.D API",
-      "unknown": "Unexpected error, check the log"
+      "unknown": "Unexpected error, check the log",
+      "invalid_date": "Invalid date – use YYYY-MM-DD format (e.g. 2026-06-04)"
     },
     "abort": {
       "already_configured": "This metering point (EAN) is already configured"
