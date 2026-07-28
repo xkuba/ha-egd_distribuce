@@ -498,6 +498,52 @@ class EgdApi:
             return await self._get_hourly_data_c1(ean, date_from, date_to)
         return await self._get_hourly_data_ab(ean, date_from, date_to)
 
+    def _consumption_profile(self, meter_type: str, day: date) -> str:
+        """Profil spotřeby pro daný typ měřiče (u A/B dle data zavedení kWh profilů)."""
+        if meter_type == METER_TYPE_C1:
+            return PROFILE_C1_CONSUMPTION
+        return PROFILE_ICQ2 if day >= KWH_PROFILES_SINCE else PROFILE_ICC1
+
+    async def async_find_first_available_date(
+        self,
+        ean: str,
+        date_from: date,
+        date_to: date,
+        meter_type: str = METER_TYPE_AB,
+    ) -> date | None:
+        """Najde nejstarší den v rozsahu, na který má účet oprávnění na data.
+
+        API odmítne celý požadavek chybou 400, i když je mimo autorizované
+        období jen jeho začátek. Oprávnění tvoří souvislé období, takže
+        nejstarší dostupný den najdeme binárním půlením (~log2(N) dotazů).
+
+        Vrací None, pokud nejsou dostupná data ani pro date_to.
+        """
+
+        async def authorized(day: date) -> bool:
+            try:
+                await self._fetch_profile(
+                    ean, self._consumption_profile(meter_type, day), day, day
+                )
+            except EgdPermissionError:
+                return False
+            return True
+
+        if await authorized(date_from):
+            return date_from
+        if not await authorized(date_to):
+            return None
+
+        # lo = známý neautorizovaný den, hi = známý autorizovaný den
+        lo, hi = date_from, date_to
+        while (hi - lo).days > 1:
+            mid = lo + timedelta(days=(hi - lo).days // 2)
+            if await authorized(mid):
+                hi = mid
+            else:
+                lo = mid
+        return hi
+
     async def async_get_om_list(self) -> list[dict[str, str]]:
         """Vrátí seznam odběrných míst s typem měření z /rest/om."""
         token = await self._ensure_token()

@@ -18,7 +18,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 import homeassistant.util.dt as dt_util
 
-from .api import EgdApi, EgdApiError
+from .api import EgdApi, EgdApiError, EgdPermissionError
 from .const import (
     CONF_EAN,
     CONF_HISTORY_FROM,
@@ -274,6 +274,26 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             hourly_data = await self.api.async_get_hourly_data(
                 self.ean, date_from, date_to, meter_type=self.meter_type
             )
+        except EgdPermissionError:
+            # Rozsah zasahuje před období, na které má účet oprávnění. API odmítne
+            # celý požadavek, i když je mimo jen jeho začátek – zúžíme ho.
+            first = await self.api.async_find_first_available_date(
+                self.ean, date_from, date_to, meter_type=self.meter_type
+            )
+            if first is None or first <= date_from:
+                raise UpdateFailed(
+                    f"EGD: účet nemá oprávnění na data v období {date_from} – {date_to}"
+                ) from None
+            _LOGGER.warning(
+                "EGD: oprávnění na data až od %s (požadováno od %s), zužuji rozsah",
+                first, date_from,
+            )
+            try:
+                hourly_data = await self.api.async_get_hourly_data(
+                    self.ean, first, date_to, meter_type=self.meter_type
+                )
+            except EgdApiError as err:
+                raise UpdateFailed(f"EGD API chyba: {err}") from err
         except EgdApiError as err:
             raise UpdateFailed(f"EGD API chyba: {err}") from err
 
