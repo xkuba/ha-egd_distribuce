@@ -11,6 +11,7 @@ from homeassistant.components.recorder.models import StatisticData, StatisticMea
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
     get_last_statistics,
+    statistics_during_period,
 )
 from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant
@@ -151,19 +152,27 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # ------------------------------------------------------------------
 
     async def _get_last_recorded_date(self) -> date | None:
-        """Vrátí datum posledního záznamu spotřeby v recorderu (None = žádná data).
+        """Vrátí datum posledního KOMPLETNÍHO dne spotřeby v recorderu.
 
-        Používá "sum" jako typ – start je vždy součástí výsledku bez ohledu na typ.
+        Statistiky jsou hodinové, takže poslední záznam může být uprostřed dne.
+        Za kompletní považujeme den, jehož poslední hodina (23:xx lokálně) je
+        uložená – jinak vrátíme den předchozí, aby se zbytek dne dostáhl.
         """
         statistic_id = f"{DOMAIN}:{self.ean}_consumption"
         last_stats = await get_instance(self.hass).async_add_executor_job(
             lambda: get_last_statistics(self.hass, 1, statistic_id, True, {"sum"})
         )
-        if last_stats and statistic_id in last_stats:
-            start = last_stats[statistic_id][0].get("start")
-            if start:
-                return datetime.fromtimestamp(start, tz=dt_util.DEFAULT_TIME_ZONE).date()
-        return None
+        if not last_stats or statistic_id not in last_stats:
+            return None
+
+        start = last_stats[statistic_id][0].get("start")
+        if not start:
+            return None
+
+        last_hour = datetime.fromtimestamp(start, tz=dt_util.DEFAULT_TIME_ZONE)
+        if last_hour.hour == 23:
+            return last_hour.date()
+        return last_hour.date() - timedelta(days=1)
 
     async def _load_state_from_recorder(self) -> None:
         """Načte poslední uložené hodnoty a dostupné profily z recorderu.
@@ -172,26 +181,40 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         kompletní a stahování se přeskočí – bez toho by senzory zůstaly
         „neznámé" a nešlo by rozhodnout, které profily nemají data.
         """
+        # Statistiky jsou hodinové – denní součet získáme agregací period="day".
+        # Pro sum-statistiky vrací HA kumulativní součet ke konci dne, takže
+        # spotřeba dne = rozdíl dvou po sobě jdoucích dnů.
+        stat_ids = {
+            f"{DOMAIN}:{self.ean}_{suffix}": data_key
+            for data_key, (suffix, _unit, _name) in STAT_DEFINITIONS.items()
+        }
+        window_start = (dt_util.now() - timedelta(days=10)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+
+        stats = await get_instance(self.hass).async_add_executor_job(
+            lambda: statistics_during_period(
+                self.hass, window_start, None, set(stat_ids), "day", None, {"sum"}
+            )
+        )
+
         found: set[str] = set()
 
-        for data_key, (stat_suffix, _unit, _name) in STAT_DEFINITIONS.items():
-            statistic_id = f"{DOMAIN}:{self.ean}_{stat_suffix}"
-            stats = await get_instance(self.hass).async_add_executor_job(
-                lambda sid=statistic_id: get_last_statistics(
-                    self.hass, 1, sid, True, {"state", "sum"}
-                )
-            )
-            if not stats or statistic_id not in stats:
+        for statistic_id, rows in stats.items():
+            data_key = stat_ids.get(statistic_id)
+            if data_key is None or not rows:
                 continue
 
-            row = stats[statistic_id][0]
             found.add(data_key)
 
-            state = row.get("state")
-            if state is not None:
-                self._latest_values[data_key] = round(float(state), 4)
+            last_sum = rows[-1].get("sum")
+            if last_sum is None:
+                continue
+            prev_sum = rows[-2].get("sum") if len(rows) >= 2 else None
+            value = last_sum - prev_sum if prev_sum is not None else last_sum
 
-            start = row.get("start")
+            self._latest_values[data_key] = round(value, 4)
+            start = rows[-1].get("start")
             if start:
                 self._latest_dates[data_key] = datetime.fromtimestamp(
                     start, tz=dt_util.DEFAULT_TIME_ZONE
@@ -236,27 +259,38 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         await self._sync_range(date_from, date_to)
 
+    @staticmethod
+    def _group_by_local_day(hourly: dict[datetime, float]) -> dict[date, float]:
+        """Sečte hodinové hodnoty do lokálních kalendářních dnů."""
+        daily: dict[date, float] = {}
+        for hour_start, value in hourly.items():
+            day = hour_start.astimezone(dt_util.DEFAULT_TIME_ZONE).date()
+            daily[day] = daily.get(day, 0.0) + value
+        return daily
+
     async def _sync_range(self, date_from: date, date_to: date) -> None:
         """Stáhne a uloží data pro zadaný rozsah dat."""
         try:
-            daily_data = await self.api.async_get_daily_data(
+            hourly_data = await self.api.async_get_hourly_data(
                 self.ean, date_from, date_to, meter_type=self.meter_type
             )
         except EgdApiError as err:
             raise UpdateFailed(f"EGD API chyba: {err}") from err
 
-        # Uložíme poslední dostupný den pro zobrazení v senzorech
-        for data_key, daily in daily_data.items():
-            if daily:
-                last_day = max(daily.keys())
-                self._latest_values[data_key] = round(daily[last_day], 4)
-                self._latest_dates[data_key] = last_day
+        # Pro senzory potřebujeme denní součet posledního dostupného dne
+        for data_key, hourly in hourly_data.items():
+            if not hourly:
+                continue
+            daily = self._group_by_local_day(hourly)
+            last_day = max(daily.keys())
+            self._latest_values[data_key] = round(daily[last_day], 4)
+            self._latest_dates[data_key] = last_day
 
         # Zjištění dostupných profilů – jen pokud stahování evidentně fungovalo
         # (spotřeba má data). Sjednocujeme, aby profil, který jednou data vrátil,
         # nezmizel kvůli dni bez hodnot.
-        if daily_data.get("consumption_kwh"):
-            found = {key for key, daily in daily_data.items() if daily}
+        if hourly_data.get("consumption_kwh"):
+            found = {key for key, hourly in hourly_data.items() if hourly}
             if self.available_data_keys is None:
                 self.available_data_keys = found
             else:
@@ -265,8 +299,8 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Zapíšeme každý datový typ jako statistiku
         for data_key, (stat_suffix, unit, name) in STAT_DEFINITIONS.items():
-            daily = daily_data.get(data_key, {})
-            if not daily:
+            hourly = hourly_data.get(data_key, {})
+            if not hourly:
                 continue
 
             statistic_id = f"{DOMAIN}:{self.ean}_{stat_suffix}"
@@ -274,7 +308,7 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 statistic_id=statistic_id,
                 unit=unit,
                 name=f"EGD {self.ean} {name}",
-                daily=daily,
+                hourly=hourly,
             )
 
     async def _import_statistics(
@@ -282,14 +316,16 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         statistic_id: str,
         unit: str,
         name: str,
-        daily: dict[date, float],
+        hourly: dict[datetime, float],
     ) -> None:
         """
-        Zapíše denní hodnoty do HA recorder jako external statistics.
+        Zapíše hodinové hodnoty do HA recorder jako external statistics.
 
-        Každá hodnota je uložena na začátek příslušného dne (00:00 lokálního času).
-        Tím zajistíme správné zobrazení v Energy Dashboard bez ohledu
-        na to, kdy byla data stažena.
+        Statistiky HA mají hodinovou granularitu, takže Energy Dashboard
+        zobrazí skutečný průběh dne, ne jeden sloupec.
+
+        Zapisujeme jen hodiny novější než poslední uložený záznam – kumulativní
+        součet by se jinak při opakovaném stažení téhož období započítal dvakrát.
         """
         metadata = StatisticMetaData(
             has_mean=False,
@@ -301,31 +337,33 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             unit_of_measurement=unit,
         )
 
-        # Získáme poslední uložený součet pro správné kumulativní počítání
+        # Poslední uložený záznam – navazujeme na jeho kumulativní součet
         last_stats = await get_instance(self.hass).async_add_executor_job(
             lambda: get_last_statistics(self.hass, 1, statistic_id, True, {"sum"})
         )
         last_sum = 0.0
+        last_start: datetime | None = None
         if last_stats and statistic_id in last_stats:
-            last_sum = last_stats[statistic_id][0].get("sum") or 0.0
+            row = last_stats[statistic_id][0]
+            last_sum = row.get("sum") or 0.0
+            start_ts = row.get("start")
+            if start_ts:
+                last_start = datetime.fromtimestamp(start_ts, tz=dt_util.UTC)
 
-        # Seřadíme dny chronologicky
         statistics: list[StatisticData] = []
         running_sum = last_sum
+        skipped = 0
 
-        for day in sorted(daily.keys()):
-            value = round(daily[day], 4)
+        for hour_start in sorted(hourly.keys()):
+            if last_start is not None and hour_start <= last_start:
+                skipped += 1
+                continue
+
+            value = round(hourly[hour_start], 4)
             running_sum += value
-
-            # Timestamp = začátek dne v lokálním timezone (stejná zóna, pod kterou
-            # api.py zařazuje čtvrthodiny do dnů – jinak by hodnoty spadly do jiného dne)
-            dt_start = datetime(
-                day.year, day.month, day.day, 0, 0, 0, tzinfo=dt_util.DEFAULT_TIME_ZONE
-            )
-
             statistics.append(
                 StatisticData(
-                    start=dt_start,
+                    start=hour_start,
                     sum=round(running_sum, 4),
                     state=value,
                 )
@@ -334,7 +372,8 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if statistics:
             async_add_external_statistics(self.hass, metadata, statistics)
             _LOGGER.debug(
-                "EGD: zapsáno %d statistik pro %s", len(statistics), statistic_id
+                "EGD: zapsáno %d hodinových statistik pro %s (%d již uložených přeskočeno)",
+                len(statistics), statistic_id, skipped,
             )
 
     # ------------------------------------------------------------------

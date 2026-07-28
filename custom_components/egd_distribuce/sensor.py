@@ -9,7 +9,6 @@ from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
     SensorEntityDescription,
-    SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfEnergy
@@ -23,6 +22,12 @@ from .const import CONF_EAN, COORDINATOR_KEY, DOMAIN, METER_TYPE_AB, METER_TYPE_
 from .coordinator import EgdCoordinator
 
 _LOGGER = logging.getLogger(__name__)
+
+# Senzory záměrně NEMAJÍ state_class. Jejich hodnota je denní součet posledního
+# dostupného dne, který se mění jednou denně a mezi dny klesá i roste – jako
+# TOTAL_INCREASING by z toho HA odvozovalo nesmyslnou energii (pokles chápe jako
+# reset měřidla). Do Energy Dashboardu patří externí statistika
+# "egd_distribuce:<ean>_<profil>", kterou zapisuje coordinator po hodinách.
 
 
 @dataclass(frozen=True)
@@ -41,7 +46,6 @@ _SENSORS_ALL: tuple[EgdSensorEntityDescription, ...] = (
         data_key="consumption_kwh",
         name="Spotřeba ze sítě",
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL_INCREASING,
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         icon="mdi:transmission-tower-import",
         suggested_display_precision=2,
@@ -51,7 +55,6 @@ _SENSORS_ALL: tuple[EgdSensorEntityDescription, ...] = (
         data_key="production_kwh",
         name="Dodávka do sítě (FVE)",
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL_INCREASING,
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         icon="mdi:transmission-tower-export",
         suggested_display_precision=2,
@@ -65,7 +68,6 @@ _SENSORS_SHARING: tuple[EgdSensorEntityDescription, ...] = (
         data_key="sharing_commercial_kwh",
         name="Sdílení energie – obchodní",
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL_INCREASING,
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         icon="mdi:account-group",
         suggested_display_precision=2,
@@ -75,7 +77,6 @@ _SENSORS_SHARING: tuple[EgdSensorEntityDescription, ...] = (
         data_key="sharing_distribution_kwh",
         name="Sdílení energie – distribuční",
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL_INCREASING,
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         icon="mdi:transmission-tower",
         suggested_display_precision=2,
@@ -85,7 +86,6 @@ _SENSORS_SHARING: tuple[EgdSensorEntityDescription, ...] = (
         data_key="production_sharing_kwh",
         name="Dodávka ponížená v rámci sdílení",
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL_INCREASING,
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         icon="mdi:transmission-tower-export",
         suggested_display_precision=2,
@@ -99,7 +99,6 @@ _SENSORS_AB: tuple[EgdSensorEntityDescription, ...] = (
         data_key="reactive_consumption_kvarh",
         name="Jalová spotřeba",
         device_class=SensorDeviceClass.REACTIVE_ENERGY,
-        state_class=SensorStateClass.TOTAL_INCREASING,
         native_unit_of_measurement="kvarh",
         icon="mdi:lightning-bolt",
         suggested_display_precision=2,
@@ -110,7 +109,6 @@ _SENSORS_AB: tuple[EgdSensorEntityDescription, ...] = (
         data_key="reactive_production_kvarh",
         name="Jalová dodávka",
         device_class=SensorDeviceClass.REACTIVE_ENERGY,
-        state_class=SensorStateClass.TOTAL_INCREASING,
         native_unit_of_measurement="kvarh",
         icon="mdi:lightning-bolt-outline",
         suggested_display_precision=2,
