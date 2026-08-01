@@ -16,6 +16,12 @@ Custom integrace pro stahování naměřených dat z EG.D Distribuce přes OpenA
 - ✅ Sdílení energie – distribuční část (kWh)
 - ✅ Dodávka ponížená v rámci sdílení (kWh)
 
+### Náklady
+- ✅ Statistika nákladů v Kč pro Energy Dashboard – včetně celé historie
+- ✅ Tarif VT/NT z veřejného **kalendáře HDO** (funguje i zpětně)
+- ✅ Cenová období s platností od data – zdražení nepřepíše starší náklady
+- ✅ Senzor měsíčních nákladů včetně stálé platby
+
 ### Integrace do HA
 - ✅ Nastavení přes GUI (Config Flow) – žádný YAML
 - ✅ **Hodinová granularita** statistik – Energy Dashboard ukáže skutečný průběh dne
@@ -101,10 +107,14 @@ Pro každé odběrné místo přidej integraci zvlášť.
 
 Po přidání lze upravit v **Nastavení → Zařízení a služby → EG.D Distribuce → Konfigurovat**:
 
-| Parametr | Výchozí | Popis |
-|---|---|---|
-| Hodina stahování | 17 | Data se stáhnou při prvním ticku v nebo po zadané hodině |
-| Datum počátku historie | 30 dní zpět | Od tohoto data se stáhne zpětná historie |
+| Sekce | Parametr | Výchozí | Popis |
+|---|---|---|---|
+| Stahování dat | Hodina stahování | 17 | Data se stáhnou při prvním ticku v nebo po zadané hodině |
+| Stahování dat | Datum počátku historie | 30 dní zpět | Od tohoto data se stáhne zpětná historie |
+| Tarif HDO | Způsob určení tarifu | jednotarif | Viz [Náklady na elektřinu](#náklady-na-elektřinu) |
+| Cenová období | Ceny a stálá platba | – | Seznam období s platností od data |
+
+Změny se ukládají až volbou **„Uložit a zavřít"**, takže lze v jednom průchodu přidat víc cenových období.
 
 Pokud zadané datum sahá dál, než kam má účet oprávnění, integrace rozsah **sama zúží** na nejstarší dostupný den – nespadne.
 
@@ -124,6 +134,7 @@ Integrace zapisuje data jako external statistics. Ty se na dashboard nepřidají
 | Dodávka ponížená sdílením | `egd_distribuce:<EAN>_production_sharing` |
 | Jalová spotřeba | `egd_distribuce:<EAN>_reactive_consumption` |
 | Jalová dodávka | `egd_distribuce:<EAN>_reactive_production` |
+| **Náklady na spotřebu (Kč)** | `egd_distribuce:<EAN>_consumption_cost` |
 
 ⚠️ Nevybírejte entitu senzoru (`sensor.…`) – ta do Energy Dashboardu nepatří, viz [Jak to funguje](#jak-to-funguje--statistiky-vs-senzory).
 
@@ -164,6 +175,74 @@ stat_types:
 | `sum` | kumulativní součet od začátku měření – stále rostoucí křivka, zřídka to, co chcete |
 
 ⚠️ Při `period: day` (a delších) **nepoužívejte `state`**. Agregace na delší periodu přebírá hodnotu posledního záznamu v periodě, takže byste místo celodenní spotřeby dostali jen spotřebu poslední hodiny dne. Pro součty za den slouží `change`.
+
+## Náklady na elektřinu
+
+Integrace umí spočítat, kolik odebraná energie stála, a to i zpětně pro celou historii.
+
+### Proč vlastní statistika nákladů
+
+Home Assistant umí náklady dopočítat sám z ceny za kWh, ale **jen pro zdroje, které jsou skutečné entity**. Naše spotřeba je externí statistika, a tu HA odmítá s hláškou *„Entity or number price is not supported for external statistics. Use stat_cost instead."*
+
+Integrace proto zapisuje vlastní hodinovou statistiku nákladů `egd_distribuce:<EAN>_consumption_cost` v Kč. V panelu energie ji vyberte volbou **„Použít entitu sledující celkové náklady"**, ne polem s cenou.
+
+### Tarif VT/NT
+
+API měřených dat tarif neobsahuje – spotřeba chodí jako jeden profil. Tarif se proto bere z veřejného kalendáře HDO (`hdo.distribuce24.cz`). Protože je to **rozvrh, ne živý signál**, lze podle něj určit tarif i pro data stará měsíce.
+
+Nastavení najdete v **Konfigurovat → Tarif HDO**:
+
+| Režim | Co zadat | Kde to najít |
+|---|---|---|
+| Jednotarif | nic | jedna cena pro celý den |
+| Smart | kód typu `Cd2526_2` | na přijímači HDO nebo v aplikaci Distribuce24 |
+| Klasický | PSČ + příkazový kód A/B/DP | na přijímači HDO u elektroměru |
+
+Formát kódu si ověříte na [hdo.distribuce24.cz/casy](https://hdo.distribuce24.cz/casy). U klasických kódů se stává, že jeden kód řídí víc relé (topení, ohřev vody) s různými časy – integrace se pak doptá, které z nich řídí váš tarif.
+
+### Cenová období
+
+Ceny se zadávají jako **seznam období, každé s datem platnosti od**. Pro každou čtvrthodinu se použije cena platná v danou dobu.
+
+Díky tomu zdražení neovlivní už spočítané náklady: přidáte nové období od data zdražení a starší data si podrží svou původní cenu. Přepočítávat nemusíte nic.
+
+V **Konfigurovat → Cenová období** zadejte:
+
+| Pole | Význam |
+|---|---|
+| Platnost od | datum, od kterého ceny platí |
+| Cena VT | výsledná cena za kWh vč. distribuce, poplatků a daní |
+| Cena NT | cena v nízkém tarifu (u jednotarifu nechte prázdné) |
+| Stálá měsíční platba | započítá se jen do senzoru měsíčních nákladů |
+
+Spotřeba z doby **před prvním obdobím se záměrně neoceňuje** – radši žádný údaj než odhad.
+
+### Senzory kolem ceny
+
+Vzniknou, jakmile zadáte aspoň jedno cenové období:
+
+| Senzor | Hodnota |
+|---|---|
+| Náklady tento měsíc | spotřeba × cena + stálá platba, reset k 1. dni měsíce |
+| Aktuální cena | Kč/kWh platná právě teď dle tarifu a období |
+| Aktuální tarif | VT / NT (jen při dvoutarifu) |
+
+Senzor měsíčních nákladů do panelu energie **nepatří** – stálá platba není za kWh a se statistikou nákladů by se dublovala.
+
+### Přesnost
+
+Náklady se počítají na **čtvrthodinách** a teprve pak sčítají do hodin. Některé rozvrhy HDO přepínají na desetiminutách, takže čtvrthodina může spadat do obou tarifů – energie se v takovém případě rozdělí poměrem překryvu, ne binárně.
+
+Historická přesnost stojí na aktuálně publikovaném rozvrhu. Pokud EG.D časy v minulosti měnil, na stará data se použije dnešní verze.
+
+### Přepočet po opravě ceny
+
+Zavedení nové ceny přepočet nevyžaduje. Potřebujete ho jen když **opravíte cenu už proběhlého období**:
+
+1. **Vývojářské nástroje → Statistiky** → smažte `egd_distribuce:<EAN>_consumption_cost`
+2. Integraci znovu načtěte
+
+Integrace pozná, že náklady zaostávají za spotřebou, a dopočítá je znovu – s cenami podle jednotlivých období.
 
 ## Smazání a opětovné stažení dat
 
