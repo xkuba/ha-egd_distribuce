@@ -84,13 +84,26 @@ class HdoVariant:
     sazba: str
     skupina_povelu: str
     region: str
+    # Hodin nízkého tarifu za den v aktuálně platné sezóně (None = nezjištěno)
+    nt_hours: float | None = None
 
     @property
     def label(self) -> str:
-        return f"{self.sazba} ({self.skupina_povelu}, {self.region})"
+        """Popisek pro výběr v konfiguraci.
+
+        Počet hodin je tu podstatný: jeden kód často řídí i vedlejší obvod
+        (typicky TUV – bojler), který má výrazně méně hodin a tarif neurčuje.
+        Rozvrh s nejvíc hodinami odpovídá sazbě a je ten správný.
+        """
+        base = f"{self.sazba} ({self.skupina_povelu}, {self.region})"
+        if self.nt_hours is None:
+            return base
+        return f"{base} – {self.nt_hours:g} h NT/den"
 
 
-def variant_of(record: dict[str, Any]) -> HdoVariant:
+def variant_of(
+    record: dict[str, Any], nt_hours: float | None = None
+) -> HdoVariant:
     """Vytvoří identifikátor varianty ze záznamu."""
     sazba = (record.get("sazby") or [{}])[0].get("sazba", "")
     skupina = record.get("skupinaPovelu", "")
@@ -100,6 +113,7 @@ def variant_of(record: dict[str, Any]) -> HdoVariant:
         sazba=sazba,
         skupina_povelu=skupina,
         region=region,
+        nt_hours=nt_hours,
     )
 
 
@@ -156,6 +170,13 @@ class HdoSchedule:
                 overlap += max(0, min(end - MINUTES_PER_DAY, win_end) - win_start)
 
         return min(1.0, overlap / duration_minutes)
+
+    def nt_hours_per_day(self, day: date) -> float:
+        """Kolik hodin nízkého tarifu má zadaný den."""
+        minutes = 0
+        for start, end in self._windows_for(day):
+            minutes += max(0, end - start)
+        return round(minutes / 60, 2)
 
     def is_low_tariff(self, moment_local: datetime) -> bool:
         """Je v daném okamžiku nízký tarif?"""
@@ -238,12 +259,33 @@ class HdoClient:
 
     @staticmethod
     def variants(records: list[dict[str, Any]]) -> list[HdoVariant]:
-        """Rozlišitelné varianty v sadě záznamů (u klasických kódů i více relé)."""
+        """Rozlišitelné varianty v sadě záznamů (u klasických kódů i více relé).
+
+        Ke každé doplní počet hodin nízkého tarifu v právě platné sezóně,
+        aby šlo v konfiguraci poznat tarifní relé od vedlejšího obvodu.
+        Řadí se sestupně – tarifní rozvrh má hodin nejvíc.
+        """
+        today = date.today()
         seen: dict[str, HdoVariant] = {}
+
+        for record in records:
+            key = variant_of(record).key
+            if key in seen or not _in_season(record, today):
+                continue
+            try:
+                hours = HdoSchedule([record]).nt_hours_per_day(today)
+            except HdoError:
+                hours = None
+            seen[key] = variant_of(record, hours)
+
+        # Záznamy mimo aktuální sezónu doplníme bez počtu hodin
         for record in records:
             variant = variant_of(record)
             seen.setdefault(variant.key, variant)
-        return list(seen.values())
+
+        return sorted(
+            seen.values(), key=lambda v: (v.nt_hours is None, -(v.nt_hours or 0))
+        )
 
     @staticmethod
     def schedule_for(

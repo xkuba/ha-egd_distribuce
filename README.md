@@ -198,7 +198,20 @@ Nastavení najdete v **Konfigurovat → Tarif HDO**:
 | Smart | kód typu `Cd2526_2` | na přijímači HDO nebo v aplikaci Distribuce24 |
 | Klasický | PSČ + příkazový kód A/B/DP | na přijímači HDO u elektroměru |
 
-Formát kódu si ověříte na [hdo.distribuce24.cz/casy](https://hdo.distribuce24.cz/casy). U klasických kódů se stává, že jeden kód řídí víc relé (topení, ohřev vody) s různými časy – integrace se pak doptá, které z nich řídí váš tarif.
+Formát kódu si ověříte na [hdo.distribuce24.cz/casy](https://hdo.distribuce24.cz/casy).
+
+#### Když se integrace doptá na rozvrh
+
+Jeden kód často řídí víc relé. Vedle tarifního relé bývá ještě samostatný obvod pro ohřev vody (`TUV`), který jen spíná bojler a na cenu za kWh nemá vliv. Integrace proto u každé volby ukazuje **počet hodin nízkého tarifu za den**:
+
+```
+D57d-relé1-PVTC,PV (AD579, SM) – 20 h NT/den    <- tarifní relé
+D57d-relé2-TUV     (AD579, SM) –  8 h NT/den    <- jen bojler
+```
+
+Vyberte ten, jehož počet hodin odpovídá vaší sazbě (např. D57d má 20 h, D25d/D26d 8 h). Nabídka je seřazená sestupně, takže tarifní rozvrh bývá první. Pokud mají obě volby stejný počet hodin, rozhoduje název: `TAR` je tarifní obvod, `TUV` ohřev vody.
+
+Sezónní varianty (zima/léto) řeší integrace sama – vybíráte jen relé.
 
 ### Cenová období
 
