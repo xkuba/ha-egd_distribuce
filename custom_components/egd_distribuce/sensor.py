@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
     SensorEntityDescription,
+    SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfEnergy
@@ -17,8 +19,16 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+import homeassistant.util.dt as dt_util
 
-from .const import CONF_EAN, COORDINATOR_KEY, DOMAIN, METER_TYPE_AB, METER_TYPE_C1
+from .const import (
+    CONF_EAN,
+    COORDINATOR_KEY,
+    CURRENCY_CZK,
+    DOMAIN,
+    METER_TYPE_AB,
+    METER_TYPE_C1,
+)
 from .coordinator import EgdCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -122,6 +132,31 @@ SENSOR_DESCRIPTIONS: tuple[EgdSensorEntityDescription, ...] = (
     *_SENSORS_AB,
 )
 
+# Senzory kolem ceny a tarifu – zakládají se jen když jsou nastavené ceny.
+# Nemají data_key, hodnotu berou přímo z coordinatoru.
+_SENSOR_MONTH_COST = SensorEntityDescription(
+    key="month_cost",
+    name="Náklady tento měsíc",
+    device_class=SensorDeviceClass.MONETARY,
+    native_unit_of_measurement=CURRENCY_CZK,
+    icon="mdi:cash-multiple",
+    suggested_display_precision=2,
+)
+
+_SENSOR_CURRENT_PRICE = SensorEntityDescription(
+    key="current_price",
+    name="Aktuální cena",
+    native_unit_of_measurement=f"{CURRENCY_CZK}/kWh",
+    icon="mdi:currency-usd",
+    suggested_display_precision=2,
+)
+
+_SENSOR_TARIFF = SensorEntityDescription(
+    key="tariff",
+    name="Aktuální tarif",
+    icon="mdi:toggle-switch-outline",
+)
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -154,6 +189,17 @@ async def async_setup_entry(
 
     if available is not None:
         _sync_registry_disabled_state(hass, entities, available)
+
+    # Cenové senzory dávají smysl jen se zadanými cenami
+    if coordinator.pricing_enabled:
+        price_entities: list[SensorEntity] = [
+            EgdMonthCostSensor(coordinator, _SENSOR_MONTH_COST, ean),
+            EgdCurrentPriceSensor(coordinator, _SENSOR_CURRENT_PRICE, ean),
+        ]
+        # Tarif má smysl jen při dvoutarifu
+        if coordinator.current_tariff() is not None:
+            price_entities.append(EgdTariffSensor(coordinator, _SENSOR_TARIFF, ean))
+        async_add_entities(price_entities)
 
 
 @callback
@@ -262,3 +308,93 @@ class EgdSensor(CoordinatorEntity[EgdCoordinator], SensorEntity):
     def available(self) -> bool:
         """Senzor je vždy dostupný – data jsou historická."""
         return True
+
+
+class _EgdBaseSensor(CoordinatorEntity[EgdCoordinator], SensorEntity):
+    """Společný základ pro senzory ceny a tarifu."""
+
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        coordinator: EgdCoordinator,
+        description: SensorEntityDescription,
+        ean: str,
+    ) -> None:
+        super().__init__(coordinator)
+        self.entity_description = description
+        self._ean = ean
+        self._attr_unique_id = f"{ean}_{description.key}"
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, ean)})
+
+
+class EgdMonthCostSensor(_EgdBaseSensor):
+    """Náklady za probíhající měsíc včetně stálé platby.
+
+    state_class TOTAL s resetem k 1. dni měsíce je tu korektní – hodnota
+    v rámci měsíce roste a na přelomu se vynuluje.
+    """
+
+    _attr_state_class = SensorStateClass.TOTAL
+
+    @property
+    def native_value(self) -> float | None:
+        return self.coordinator.month_cost_total
+
+    @property
+    def last_reset(self) -> datetime | None:
+        now = dt_util.now()
+        return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        period = self.coordinator.price_list.for_date(dt_util.now().date())
+        return {
+            "naklady_za_energii": self.coordinator.month_energy_cost,
+            "stala_platba": period.monthly_fee if period else None,
+            "cenove_obdobi_od": (
+                period.valid_from.isoformat() if period else None
+            ),
+            # Data z EG.D chodí se zpožděním jednoho dne
+            "posledni_zapocteny_den": self.coordinator.data.get("dates", {}).get(
+                "consumption_kwh"
+            )
+            if self.coordinator.data
+            else None,
+        }
+
+
+class EgdCurrentPriceSensor(_EgdBaseSensor):
+    """Cena za kWh platná právě teď (dle tarifu a cenového období)."""
+
+    @property
+    def native_value(self) -> float | None:
+        return self.coordinator.current_price()
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        period = self.coordinator.price_list.for_date(dt_util.now().date())
+        if period is None:
+            return {}
+        return {
+            "cena_vt": period.price_vt,
+            "cena_nt": period.price_nt,
+            "tarif": self.coordinator.current_tariff(),
+            "cenove_obdobi_od": period.valid_from.isoformat(),
+        }
+
+
+class EgdTariffSensor(_EgdBaseSensor):
+    """Aktuálně platný tarif (VT / NT) podle rozvrhu HDO."""
+
+    @property
+    def native_value(self) -> str | None:
+        return self.coordinator.current_tariff()
+
+    @property
+    def icon(self) -> str:
+        return (
+            "mdi:toggle-switch"
+            if self.coordinator.current_tariff() == "NT"
+            else "mdi:toggle-switch-off-outline"
+        )

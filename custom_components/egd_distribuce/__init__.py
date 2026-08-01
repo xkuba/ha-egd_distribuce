@@ -34,6 +34,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         ean=entry.data[CONF_EAN],
         entry_id=entry.entry_id,
         entry=entry,
+        # Rozvrh HDO se stahuje z jiného (veřejného) endpointu než měřená data
+        hdo_session=session,
     )
 
     # První refresh – stáhne historii a nastaví statistiky

@@ -256,23 +256,26 @@ class EgdApi:
     # Agregace – součet čtvrthodin za každý den
     # ------------------------------------------------------------------
 
-    def _aggregate_hourly(
+    def _aggregate_quarters(
         self,
         records: list[dict[str, Any]],
         is_power_kw: bool,
     ) -> dict[datetime, float]:
         """
-        Z čtvrthodinových záznamů vypočítá hodinové součty.
+        Převede záznamy API na čtvrthodinové hodnoty klíčované začátkem intervalu.
 
-        Klíčem je začátek hodiny v UTC – statistiky HA se ukládají po hodinách
-        a jako UTC timestampy, takže bucketování v UTC je korektní i přes
-        přechody letního času.
+        Vracíme surové čtvrthodiny, ne hodinové součty – tarif HDO se přepíná
+        i uprostřed hodiny (některé rozvrhy dokonce na desetiminutách), takže
+        pro správný výpočet nákladů je potřeba jemnější rozlišení. Do hodin
+        se agreguje až coordinator.
+
+        Klíč je v UTC, což je korektní i přes přechody letního času.
 
         Platný status je W pro všechny typy měřičů (dle dokumentace 2026-05).
         Pro kW profily (ICC1, ISC1): hodnota kW ÷ 4 = kWh za čtvrthodinu.
         Pro kWh profily (ICQ2, ISQ2, DCQC, DSQC): hodnoty jsou již energie.
         """
-        hourly: dict[datetime, float] = {}
+        quarters: dict[datetime, float] = {}
 
         for rec in records:
             if rec.get("status") != STATUS_VALID:
@@ -289,27 +292,26 @@ class EgdApi:
 
             ts_str = rec.get("timestamp", "")
             try:
-                dt_utc = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                hour_start = dt_utc.replace(minute=0, second=0, microsecond=0)
+                start = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
             except (ValueError, TypeError, AttributeError):
                 continue
 
             energy = value / 4.0 if is_power_kw else value
-            hourly[hour_start] = hourly.get(hour_start, 0.0) + energy
+            quarters[start] = quarters.get(start, 0.0) + energy
 
-        return hourly
+        return quarters
 
     # ------------------------------------------------------------------
     # Načtení denních dat dle typu měřiče
     # ------------------------------------------------------------------
 
-    async def _get_hourly_data_ab(
+    async def _get_quarter_data_ab(
         self,
         ean: str,
         date_from: date,
         date_to: date,
     ) -> dict[str, dict[datetime, float]]:
-        """Stáhne a agreguje hodinová data pro typ A/B."""
+        """Stáhne a agreguje čtvrthodinová data pro typ A/B."""
         use_kwh = date_from >= KWH_PROFILES_SINCE
         result: dict[str, dict[datetime, float]] = {}
 
@@ -319,9 +321,9 @@ class EgdApi:
         if not records and use_kwh:
             _LOGGER.debug("EGD A/B: ICQ2 prázdné, fallback na ICC1")
             records = await self._fetch_profile(ean, PROFILE_ICC1, date_from, date_to)
-            result["consumption_kwh"] = self._aggregate_hourly(records, is_power_kw=True)
+            result["consumption_kwh"] = self._aggregate_quarters(records, is_power_kw=True)
         else:
-            result["consumption_kwh"] = self._aggregate_hourly(records, is_power_kw=not use_kwh)
+            result["consumption_kwh"] = self._aggregate_quarters(records, is_power_kw=not use_kwh)
 
         # --- Dodávka do sítě: ISQ2 (kWh) nebo ISC1 (kW ÷ 4) ---
         production_profile = PROFILE_ISQ2 if use_kwh else PROFILE_ISC1
@@ -329,21 +331,21 @@ class EgdApi:
         if not records and use_kwh:
             _LOGGER.debug("EGD A/B: ISQ2 prázdné, fallback na ISC1")
             records = await self._fetch_profile(ean, PROFILE_ISC1, date_from, date_to)
-            result["production_kwh"] = self._aggregate_hourly(records, is_power_kw=True)
+            result["production_kwh"] = self._aggregate_quarters(records, is_power_kw=True)
         else:
-            result["production_kwh"] = self._aggregate_hourly(records, is_power_kw=not use_kwh)
+            result["production_kwh"] = self._aggregate_quarters(records, is_power_kw=not use_kwh)
 
         # --- Sdílení energie: ICQS (obchodní) a ICQD (distribuční) ---
         try:
             records = await self._fetch_profile(ean, PROFILE_ICQS, date_from, date_to)
-            result["sharing_commercial_kwh"] = self._aggregate_hourly(records, is_power_kw=False)
+            result["sharing_commercial_kwh"] = self._aggregate_quarters(records, is_power_kw=False)
         except EgdPermissionError:
             _LOGGER.debug("EGD A/B: EAN %s nemá profil ICQS (sdílení obchodní), přeskakuji", ean)
             result["sharing_commercial_kwh"] = {}
 
         try:
             records = await self._fetch_profile(ean, PROFILE_ICQD, date_from, date_to)
-            result["sharing_distribution_kwh"] = self._aggregate_hourly(records, is_power_kw=False)
+            result["sharing_distribution_kwh"] = self._aggregate_quarters(records, is_power_kw=False)
         except EgdPermissionError:
             _LOGGER.debug("EGD A/B: EAN %s nemá profil ICQD (sdílení distribuční), přeskakuji", ean)
             result["sharing_distribution_kwh"] = {}
@@ -351,7 +353,7 @@ class EgdApi:
         # --- Dodávka ponížená v rámci sdílení: ISQS ---
         try:
             records = await self._fetch_profile(ean, PROFILE_ISQS, date_from, date_to)
-            result["production_sharing_kwh"] = self._aggregate_hourly(records, is_power_kw=False)
+            result["production_sharing_kwh"] = self._aggregate_quarters(records, is_power_kw=False)
         except EgdPermissionError:
             _LOGGER.debug("EGD A/B: EAN %s nemá profil ISQS (dodávka ponížená sdílením), přeskakuji", ean)
             result["production_sharing_kwh"] = {}
@@ -359,12 +361,12 @@ class EgdApi:
         # --- Jalová spotřeba: IKC2 (preferováno), fallback IKC1 ---
         try:
             records = await self._fetch_profile(ean, PROFILE_IKC2, date_from, date_to)
-            result["reactive_consumption_kvarh"] = self._aggregate_hourly(records, is_power_kw=True)
+            result["reactive_consumption_kvarh"] = self._aggregate_quarters(records, is_power_kw=True)
         except EgdPermissionError:
             try:
                 _LOGGER.debug("EGD A/B: IKC2 nedostupné, zkouším IKC1")
                 records = await self._fetch_profile(ean, PROFILE_IKC1, date_from, date_to)
-                result["reactive_consumption_kvarh"] = self._aggregate_hourly(records, is_power_kw=True)
+                result["reactive_consumption_kvarh"] = self._aggregate_quarters(records, is_power_kw=True)
             except EgdPermissionError:
                 _LOGGER.debug("EGD A/B: EAN %s nemá profil IKC2 ani IKC1 (jalová spotřeba), přeskakuji", ean)
                 result["reactive_consumption_kvarh"] = {}
@@ -372,18 +374,18 @@ class EgdApi:
         # --- Jalová dodávka: IMQ2 (kWh, preferováno), fallback IMC1 (kW ÷ 4) ---
         try:
             records = await self._fetch_profile(ean, PROFILE_IMQ2, date_from, date_to)
-            result["reactive_production_kvarh"] = self._aggregate_hourly(records, is_power_kw=False)
+            result["reactive_production_kvarh"] = self._aggregate_quarters(records, is_power_kw=False)
         except EgdPermissionError:
             try:
                 _LOGGER.debug("EGD A/B: IMQ2 nedostupné, zkouším IMC1")
                 records = await self._fetch_profile(ean, PROFILE_IMC1, date_from, date_to)
-                result["reactive_production_kvarh"] = self._aggregate_hourly(records, is_power_kw=True)
+                result["reactive_production_kvarh"] = self._aggregate_quarters(records, is_power_kw=True)
             except EgdPermissionError:
                 _LOGGER.debug("EGD A/B: EAN %s nemá profil IMQ2 ani IMC1 (jalová dodávka), přeskakuji", ean)
                 result["reactive_production_kvarh"] = {}
 
         _LOGGER.debug(
-            "EGD A/B: stažena data %s–%s, spotřeba %d hodin, výroba %d hodin",
+            "EGD A/B: stažena data %s–%s, spotřeba %d čtvrthodin, výroba %d čtvrthodin",
             date_from, date_to,
             len(result["consumption_kwh"]),
             len(result["production_kwh"]),
@@ -407,17 +409,17 @@ class EgdApi:
             for a, b in zip(records_a, records_b)
         )
 
-    async def _get_hourly_data_c1(
+    async def _get_quarter_data_c1(
         self,
         ean: str,
         date_from: date,
         date_to: date,
     ) -> dict[str, dict[datetime, float]]:
-        """Stáhne a agreguje hodinová data pro typ C1 (profily DCQC/DSQC/DCQS/DCQD)."""
+        """Stáhne a agreguje čtvrthodinová data pro typ C1 (profily DCQC/DSQC/DCQS/DCQD)."""
         result: dict[str, dict[datetime, float]] = {}
 
         dcqc_records = await self._fetch_profile(ean, PROFILE_C1_CONSUMPTION, date_from, date_to)
-        result["consumption_kwh"] = self._aggregate_hourly(dcqc_records, is_power_kw=False)
+        result["consumption_kwh"] = self._aggregate_quarters(dcqc_records, is_power_kw=False)
 
         # DSQC – dodávka do sítě; EAN bez výroby vrací API identická data jako DCQC
         try:
@@ -429,7 +431,7 @@ class EgdApi:
                 )
                 result["production_kwh"] = {}
             else:
-                result["production_kwh"] = self._aggregate_hourly(dsqc_records, is_power_kw=False)
+                result["production_kwh"] = self._aggregate_quarters(dsqc_records, is_power_kw=False)
         except EgdPermissionError:
             _LOGGER.debug("EGD C1: EAN %s nemá profil DSQC (dodávka do sítě), přeskakuji", ean)
             result["production_kwh"] = {}
@@ -437,7 +439,7 @@ class EgdApi:
         # DCQS – sdílení energie (obchodní část)
         try:
             records = await self._fetch_profile(ean, PROFILE_C1_SHARING_COMMERCIAL, date_from, date_to)
-            result["sharing_commercial_kwh"] = self._aggregate_hourly(records, is_power_kw=False)
+            result["sharing_commercial_kwh"] = self._aggregate_quarters(records, is_power_kw=False)
         except EgdPermissionError:
             _LOGGER.debug("EGD C1: EAN %s nemá profil DCQS (sdílení obchodní), přeskakuji", ean)
             result["sharing_commercial_kwh"] = {}
@@ -445,7 +447,7 @@ class EgdApi:
         # DCQD – sdílení energie (distribuční část)
         try:
             records = await self._fetch_profile(ean, PROFILE_C1_SHARING_DISTRIBUTION, date_from, date_to)
-            result["sharing_distribution_kwh"] = self._aggregate_hourly(records, is_power_kw=False)
+            result["sharing_distribution_kwh"] = self._aggregate_quarters(records, is_power_kw=False)
         except EgdPermissionError:
             _LOGGER.debug("EGD C1: EAN %s nemá profil DCQD (sdílení distribuční), přeskakuji", ean)
             result["sharing_distribution_kwh"] = {}
@@ -453,7 +455,7 @@ class EgdApi:
         # DSQS – dodávka ponížená v rámci sdílení
         try:
             records = await self._fetch_profile(ean, PROFILE_C1_PRODUCTION_SHARING, date_from, date_to)
-            result["production_sharing_kwh"] = self._aggregate_hourly(records, is_power_kw=False)
+            result["production_sharing_kwh"] = self._aggregate_quarters(records, is_power_kw=False)
         except EgdPermissionError:
             _LOGGER.debug("EGD C1: EAN %s nemá profil DSQS (dodávka ponížená sdílením), přeskakuji", ean)
             result["production_sharing_kwh"] = {}
@@ -463,7 +465,7 @@ class EgdApi:
         result["reactive_production_kvarh"] = {}
 
         _LOGGER.debug(
-            "EGD C1: stažena data %s–%s, spotřeba %d hodin, výroba %d hodin, sdílení-ob %d hodin, sdílení-dis %d hodin",
+            "EGD C1: stažena data %s–%s, spotřeba %d čtvrthodin, výroba %d čtvrthodin, sdílení-ob %d hodin, sdílení-dis %d hodin",
             date_from, date_to,
             len(result["consumption_kwh"]),
             len(result["production_kwh"]),
@@ -486,17 +488,17 @@ class EgdApi:
         await self._ensure_token()
         return await self.async_detect_meter_type(ean)
 
-    async def async_get_hourly_data(
+    async def async_get_quarter_data(
         self,
         ean: str,
         date_from: date,
         date_to: date,
         meter_type: str = METER_TYPE_AB,
     ) -> dict[str, dict[datetime, float]]:
-        """Stáhne a agreguje hodinová data dle typu měřiče."""
+        """Stáhne a agreguje čtvrthodinová data dle typu měřiče."""
         if meter_type == METER_TYPE_C1:
-            return await self._get_hourly_data_c1(ean, date_from, date_to)
-        return await self._get_hourly_data_ab(ean, date_from, date_to)
+            return await self._get_quarter_data_c1(ean, date_from, date_to)
+        return await self._get_quarter_data_ab(ean, date_from, date_to)
 
     def _consumption_profile(self, meter_type: str, day: date) -> str:
         """Profil spotřeby pro daný typ měřiče (u A/B dle data zavedení kWh profilů)."""

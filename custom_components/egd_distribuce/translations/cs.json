@@ -36,18 +36,88 @@
     "step": {
       "init": {
         "title": "Nastavení EG.D Distribuce",
+        "description": "Vyberte, co chcete upravit. Změny se uloží až volbou „Uložit a zavřít“.",
+        "menu_options": {
+          "zakladni": "Stahování dat",
+          "hdo": "Tarif HDO (VT/NT)",
+          "ceny": "Cenová období",
+          "ulozit": "Uložit a zavřít"
+        }
+      },
+      "zakladni": {
+        "title": "Stahování dat",
         "data": {
           "update_hour": "Hodina stahování dat (0–23)",
           "history_from": "Datum počátku historie (YYYY-MM-DD)"
         },
         "data_description": {
-          "update_hour": "Data se stáhnou při prvním spuštění coordinatoru v nebo po této hodině. EGD data jsou obvykle dostupná od odpoledne (doporučeno: 17).",
-          "history_from": "Od tohoto data se při příštím startu stáhne celá historie. Prázdné = posledních 30 dní."
+          "update_hour": "Data se stáhnou při prvním ticku v nebo po této hodině. EGD data bývají dostupná od odpoledne (doporučeno: 17).",
+          "history_from": "Od tohoto data se stáhne zpětná historie. Prázdné = posledních 30 dní. Sahá-li datum před období s oprávněním, rozsah se sám zúží."
+        }
+      },
+      "hdo": {
+        "title": "Tarif HDO",
+        "description": "Tarif nelze zjistit z API měřených dat, určuje se z veřejného rozvrhu HDO. Kód najdete na přijímači HDO u elektroměru nebo v aplikaci Distribuce24.",
+        "data": {
+          "hdo_mode": "Způsob určení tarifu",
+          "hdo_code": "Kód HDO (smart elektroměr, např. Cd2526_2)",
+          "hdo_psc": "PSČ odběrného místa (klasický elektroměr)",
+          "hdo_a": "Příkazový kód – A",
+          "hdo_b": "Příkazový kód – B",
+          "hdo_dp": "Příkazový kód – DP"
+        },
+        "data_description": {
+          "hdo_mode": "none = jednotarif (jedna cena), smart = kód typu Cd2526_2, classic = PSČ + příkazový kód A/B/DP",
+          "hdo_code": "Vyplňte jen u režimu smart",
+          "hdo_psc": "Vyplňte jen u režimu classic – určí distribuční region",
+          "hdo_a": "Vyplňte jen u režimu classic",
+          "hdo_b": "Vyplňte jen u režimu classic",
+          "hdo_dp": "Vyplňte jen u režimu classic"
+        }
+      },
+      "hdo_varianta": {
+        "title": "Výběr rozvrhu",
+        "description": "Zadanému kódu odpovídá více rozvrhů (např. různá relé pro topení a ohřev vody). Vyberte ten, který řídí váš tarif.",
+        "data": {
+          "hdo_variant": "Rozvrh"
+        }
+      },
+      "ceny": {
+        "title": "Cenová období",
+        "description": "Každé období platí od zadaného data do začátku dalšího. Díky tomu se při zdražení nepřepíšou náklady u starších dat.\n\nAktuálně nastaveno:\n{obdobi}",
+        "menu_options": {
+          "cena_pridat": "Přidat období",
+          "cena_smazat": "Odebrat období",
+          "init": "Zpět"
+        }
+      },
+      "cena_pridat": {
+        "title": "Přidat cenové období",
+        "description": "Zadejte výslednou cenu za kWh včetně distribuce, poplatků a daní.",
+        "data": {
+          "valid_from": "Platnost od (YYYY-MM-DD)",
+          "price_vt": "Cena VT (Kč/kWh)",
+          "price_nt": "Cena NT (Kč/kWh)",
+          "monthly_fee": "Stálá měsíční platba (Kč)"
+        },
+        "data_description": {
+          "valid_from": "Období se stejným datem se přepíše.",
+          "price_vt": "U jednotarifu zadejte sem jedinou cenu.",
+          "price_nt": "Nechte prázdné u jednotarifu – použije se cena VT.",
+          "monthly_fee": "Započítá se do senzoru měsíčních nákladů, ne do Energy Dashboardu."
+        }
+      },
+      "cena_smazat": {
+        "title": "Odebrat cenová období",
+        "data": {
+          "smazat": "Období ke smazání"
         }
       }
     },
     "error": {
-      "invalid_date": "Neplatné datum – použijte formát YYYY-MM-DD (např. 2026-06-04)"
+      "invalid_date": "Neplatné datum – použijte formát YYYY-MM-DD (např. 2026-06-04)",
+      "hdo_not_found": "Zadanému kódu neodpovídá žádný rozvrh HDO. Ověřte kód na hdo.distribuce24.cz/casy.",
+      "hdo_error": "Rozvrh HDO se nepodařilo načíst – zkontrolujte zadané údaje a připojení."
     }
   }
 }

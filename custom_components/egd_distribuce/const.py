@@ -58,9 +58,30 @@ CONF_EAN          = "ean"
 CONF_UPDATE_HOUR  = "update_hour"    # Hodina stahování dat (0–23)
 CONF_HISTORY_FROM = "history_from"   # Datum počátku historie (YYYY-MM-DD)
 
+# Options klíče – tarif HDO a ceny
+CONF_HDO_MODE      = "hdo_mode"       # none / smart / classic
+CONF_HDO_CODE      = "hdo_code"       # smart kód, např. Cd2526_2
+CONF_HDO_PSC       = "hdo_psc"        # PSČ pro určení regionu (klasický kód)
+CONF_HDO_A         = "hdo_a"          # klasický příkazový kód – část A
+CONF_HDO_B         = "hdo_b"          # klasický příkazový kód – část B
+CONF_HDO_DP        = "hdo_dp"         # klasický příkazový kód – část DP
+CONF_HDO_VARIANT   = "hdo_variant"    # rozlišení relé, když kód není jednoznačný
+CONF_PRICE_PERIODS = "price_periods"  # seznam cenových období (platnost od)
+
+# Režimy určení tarifu
+HDO_MODE_NONE    = "none"     # jednotarif – ceny bez rozlišení VT/NT
+HDO_MODE_SMART   = "smart"    # smart elektroměr – kód typu Cd2526_2
+HDO_MODE_CLASSIC = "classic"  # klasický elektroměr – PSČ + A/B/DP
+
 # Výchozí hodnoty
 DEFAULT_SCAN_DAYS   = 30
 DEFAULT_UPDATE_HOUR = 17   # Ve 17:xx stahujeme (data jsou dostupná od odpoledne)
+
+# Měna nákladových statistik a senzorů
+CURRENCY_CZK = "CZK"
+
+# Suffix statistiky nákladů (doplňuje se k profilu spotřeby)
+STAT_SUFFIX_COST = "consumption_cost"
 
 # Coordinator klíče
 COORDINATOR_KEY = "coordinator"
