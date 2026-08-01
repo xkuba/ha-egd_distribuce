@@ -64,7 +64,8 @@
           "hdo_psc": "PSČ odběrného místa (klasický elektroměr)",
           "hdo_a": "Příkazový kód – A",
           "hdo_b": "Příkazový kód – B",
-          "hdo_dp": "Příkazový kód – DP"
+          "hdo_dp": "Příkazový kód – DP",
+          "hdo_refresh_days": "Obnova rozvrhu (dny)"
         },
         "data_description": {
           "hdo_mode": "none = jednotarif (jedna cena), smart = kód typu Cd2526_2, classic = PSČ + příkazový kód A/B/DP",
@@ -72,7 +73,8 @@
           "hdo_psc": "Vyplňte jen u režimu classic – určí distribuční region",
           "hdo_a": "Vyplňte jen u režimu classic",
           "hdo_b": "Vyplňte jen u režimu classic",
-          "hdo_dp": "Vyplňte jen u režimu classic"
+          "hdo_dp": "Vyplňte jen u režimu classic",
+          "hdo_refresh_days": "Jak často znovu stáhnout kalendář HDO. Sezónní přechody zvládne rozvrh z paměti i bez obnovy – ta je kvůli tomu, že distributor může změnit samotné časy. Výchozí 7 dní."
         }
       },
       "hdo_varianta": {

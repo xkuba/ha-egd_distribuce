@@ -18,6 +18,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_track_point_in_time
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 import homeassistant.util.dt as dt_util
 
@@ -157,6 +158,13 @@ _SENSOR_TARIFF = SensorEntityDescription(
     icon="mdi:toggle-switch-outline",
 )
 
+_SENSOR_NEXT_CHANGE = SensorEntityDescription(
+    key="next_tariff_change",
+    name="Následující změna tarifu",
+    device_class=SensorDeviceClass.TIMESTAMP,
+    icon="mdi:clock-start",
+)
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -196,9 +204,12 @@ async def async_setup_entry(
             EgdMonthCostSensor(coordinator, _SENSOR_MONTH_COST, ean),
             EgdCurrentPriceSensor(coordinator, _SENSOR_CURRENT_PRICE, ean),
         ]
-        # Tarif má smysl jen při dvoutarifu
+        # Tarif a jeho změny mají smysl jen při dvoutarifu
         if coordinator.current_tariff() is not None:
             price_entities.append(EgdTariffSensor(coordinator, _SENSOR_TARIFF, ean))
+            price_entities.append(
+                EgdNextTariffChangeSensor(coordinator, _SENSOR_NEXT_CHANGE, ean)
+            )
         async_add_entities(price_entities)
 
 
@@ -328,6 +339,55 @@ class _EgdBaseSensor(CoordinatorEntity[EgdCoordinator], SensorEntity):
         self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, ean)})
 
 
+class _EgdTariffAwareSensor(_EgdBaseSensor):
+    """Senzor, jehož hodnota se mění v okamžik přepnutí tarifu.
+
+    Coordinator tiká jednou za hodinu, což by u tarifu nestačilo – HDO přepíná
+    i na půlhodinách a některé rozvrhy na desetiminutách. Proto si každý takový
+    senzor naplánuje překreslení přesně na čas příští změny. Rozvrh je v paměti,
+    takže to nestojí žádné volání API.
+    """
+
+    def __init__(self, coordinator, description, ean) -> None:
+        super().__init__(coordinator, description, ean)
+        self._unsub_timer: Any = None
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self._schedule_next()
+
+    async def async_will_remove_from_hass(self) -> None:
+        self._cancel_timer()
+        await super().async_will_remove_from_hass()
+
+    def _cancel_timer(self) -> None:
+        if self._unsub_timer is not None:
+            self._unsub_timer()
+            self._unsub_timer = None
+
+    @callback
+    def _schedule_next(self) -> None:
+        self._cancel_timer()
+        moment = self.coordinator.next_tariff_change()
+        if moment is None:
+            return
+        self._unsub_timer = async_track_point_in_time(
+            self.hass, self._handle_tariff_change, moment
+        )
+
+    @callback
+    def _handle_tariff_change(self, _now) -> None:
+        self._unsub_timer = None
+        self.async_write_ha_state()
+        self._schedule_next()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        # Rozvrh se mohl načíst až při prvním refreshi coordinatoru
+        self._schedule_next()
+        super()._handle_coordinator_update()
+
+
 class EgdMonthCostSensor(_EgdBaseSensor):
     """Náklady za probíhající měsíc včetně stálé platby.
 
@@ -364,7 +424,7 @@ class EgdMonthCostSensor(_EgdBaseSensor):
         }
 
 
-class EgdCurrentPriceSensor(_EgdBaseSensor):
+class EgdCurrentPriceSensor(_EgdTariffAwareSensor):
     """Cena za kWh platná právě teď (dle tarifu a cenového období)."""
 
     @property
@@ -384,7 +444,7 @@ class EgdCurrentPriceSensor(_EgdBaseSensor):
         }
 
 
-class EgdTariffSensor(_EgdBaseSensor):
+class EgdTariffSensor(_EgdTariffAwareSensor):
     """Aktuálně platný tarif (VT / NT) podle rozvrhu HDO."""
 
     @property
@@ -398,3 +458,26 @@ class EgdTariffSensor(_EgdBaseSensor):
             if self.coordinator.current_tariff() == "NT"
             else "mdi:toggle-switch-off-outline"
         )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        moment = self.coordinator.next_tariff_change()
+        return {
+            "zmena_v": moment.isoformat() if moment else None,
+            "zmena_na": self.coordinator.tariff_after_change(),
+        }
+
+
+class EgdNextTariffChangeSensor(_EgdTariffAwareSensor):
+    """Čas nejbližšího přepnutí tarifu."""
+
+    @property
+    def native_value(self):
+        return self.coordinator.next_tariff_change()
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {
+            "soucasny_tarif": self.coordinator.current_tariff(),
+            "zmena_na": self.coordinator.tariff_after_change(),
+        }

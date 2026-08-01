@@ -112,6 +112,7 @@ Po přidání lze upravit v **Nastavení → Zařízení a služby → EG.D Dist
 | Stahování dat | Hodina stahování | 17 | Data se stáhnou při prvním ticku v nebo po zadané hodině |
 | Stahování dat | Datum počátku historie | 30 dní zpět | Od tohoto data se stáhne zpětná historie |
 | Tarif HDO | Způsob určení tarifu | jednotarif | Viz [Náklady na elektřinu](#náklady-na-elektřinu) |
+| Tarif HDO | Obnova rozvrhu | 7 dní | Jak často znovu stáhnout kalendář HDO (1–90) |
 | Cenová období | Ceny a stálá platba | – | Seznam období s platností od data |
 
 Změny se ukládají až volbou **„Uložit a zavřít"**, takže lze v jednom průchodu přidat víc cenových období.
@@ -213,6 +214,20 @@ Vyberte ten, jehož počet hodin odpovídá vaší sazbě (např. D57d má 20 h,
 
 Sezónní varianty (zima/léto) řeší integrace sama – vybíráte jen relé.
 
+#### Obnova rozvrhu
+
+Kalendář se stahuje jednou za **7 dní** (nastavitelné 1–90 v poli „Obnova rozvrhu").
+
+Sezónní přechody na obnově nezávisí – integrace drží v paměti všechny sezóny naráz a vybírá podle data, takže přechod zima/léto proběhne sám i bez jediného stažení. Obnova je kvůli tomu, že distributor může změnit **samotné časy**: rok `9999` v platnosti znamená „opakuje se každý rok", nikoli „nikdy se nezmění". Změnu integrace zaloguje.
+
+Stažení stojí ~44 kB (gzip) a jde na jiný endpoint než měřená data, takže nezatěžuje váš API účet.
+
+#### Když rozvrh není znám
+
+Část rozvrhů má v platnosti konkrétní rok, ne `9999`, takže může vypršet. Pro dny bez platného rozvrhu se náklady **nepočítají vůbec** a do logu jde varování – radši žádný údaj než všechno naúčtované ve vysokém tarifu.
+
+Pozor na rozdíl: den, kdy nízký tarif prostě není (víkendová sazba D61d nemá pondělí až čtvrtek), je normálně oceněný celý ve VT. Neznámý rozvrh je něco jiného než nulový.
+
 ### Cenová období
 
 Ceny se zadávají jako **seznam období, každé s datem platnosti od**. Pro každou čtvrthodinu se použije cena platná v danou dobu.
@@ -239,6 +254,9 @@ Vzniknou, jakmile zadáte aspoň jedno cenové období:
 | Náklady tento měsíc | spotřeba × cena + stálá platba, reset k 1. dni měsíce |
 | Aktuální cena | Kč/kWh platná právě teď dle tarifu a období |
 | Aktuální tarif | VT / NT (jen při dvoutarifu) |
+| Následující změna tarifu | čas nejbližšího přepnutí (jen při dvoutarifu) |
+
+Senzory tarifu a ceny se překreslují **přesně v okamžik přepnutí**, ne až s hodinovým tikem integrace – rozvrhy přepínají i na půlhodinách a desetiminutách. Rozvrh je v paměti, takže to nestojí žádné volání API.
 
 Senzor měsíčních nákladů do panelu energie **nepatří** – stálá platba není za kWh a se statistikou nákladů by se dublovala.
 

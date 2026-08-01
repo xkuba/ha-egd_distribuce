@@ -27,12 +27,14 @@ from .const import (
     CONF_HDO_DP,
     CONF_HDO_MODE,
     CONF_HDO_PSC,
+    CONF_HDO_REFRESH_DAYS,
     CONF_HDO_VARIANT,
     CONF_HISTORY_FROM,
     CONF_METER_TYPE,
     CONF_PRICE_PERIODS,
     CONF_UPDATE_HOUR,
     CURRENCY_CZK,
+    DEFAULT_HDO_REFRESH_DAYS,
     DEFAULT_SCAN_DAYS,
     DEFAULT_UPDATE_HOUR,
     DOMAIN,
@@ -112,7 +114,9 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         self._hdo_client = HdoClient(hdo_session)
         self._hdo: HdoSchedule | None = None
-        self._hdo_loaded = False
+        # Den, ke kterému je rozvrh načtený – distributor může časy změnit,
+        # tak ho po nastavené periodě stahujeme znovu.
+        self._hdo_date: date | None = None
         # Náklady za probíhající měsíc (bez stálé platby) a měsíc, k němuž patří
         self._month_energy_cost: float | None = None
         self._month_key: tuple[int, int] | None = None
@@ -145,6 +149,9 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             await self._load_month_cost()
             self._initial_sync_done = True
             return self._build_state()
+
+        # Obnova rozvrhu HDO – uvnitř se stahuje jen po uplynutí periody
+        await self._async_hdo()
 
         if now.hour >= update_hour:
             yesterday = date.today() - timedelta(days=1)
@@ -198,17 +205,31 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_hdo(self) -> HdoSchedule | None:
         """Rozvrh HDO dle konfigurace; None u jednotarifu nebo při chybě.
 
-        Načítá se jednou za běh – rozvrh se mění zřídka a stahuje se z API,
-        které nepatří k datovému endpointu.
+        Sezónní přechody zvládne rozvrh z paměti (drží všechny sezóny naráz),
+        obnova je kvůli tomu, že distributor může změnit samotné časy. Volá se
+        při každém ticku coordinatoru, ale stahuje jen po uplynutí periody.
         """
-        if self._hdo_loaded:
+        today = dt_util.now().date()
+        refresh_days = max(
+            1,
+            int(
+                self._entry.options.get(
+                    CONF_HDO_REFRESH_DAYS, DEFAULT_HDO_REFRESH_DAYS
+                )
+            ),
+        )
+        if (
+            self._hdo_date is not None
+            and (today - self._hdo_date).days < refresh_days
+        ):
             return self._hdo
 
-        self._hdo_loaded = True
         options = self._entry.options
         mode = options.get(CONF_HDO_MODE, HDO_MODE_NONE)
 
         if mode == HDO_MODE_NONE:
+            self._hdo = None
+            self._hdo_date = today
             return None
 
         try:
@@ -224,16 +245,31 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     options.get(CONF_HDO_DP, ""),
                 )
             else:
+                self._hdo = None
+                self._hdo_date = today
                 return None
 
-            self._hdo = HdoClient.schedule_for(
-                records, options.get(CONF_HDO_VARIANT)
-            )
-            _LOGGER.debug("EGD: rozvrh HDO načten (režim %s)", mode)
+            schedule = HdoClient.schedule_for(records, options.get(CONF_HDO_VARIANT))
         except HdoError as err:
-            # Bez tarifu raději nepočítáme nic, než abychom počítali špatně.
-            _LOGGER.error("EGD: rozvrh HDO se nepodařilo načíst: %s", err)
-            self._hdo = None
+            if self._hdo is not None:
+                # Starý rozvrh je pořád lepší než žádný – zkusíme to za hodinu.
+                # _hdo_date záměrně nenastavujeme, aby se obnova opakovala.
+                _LOGGER.warning(
+                    "EGD: rozvrh HDO se nepodařilo obnovit (%s), používám dosavadní",
+                    err,
+                )
+            else:
+                _LOGGER.error("EGD: rozvrh HDO se nepodařilo načíst: %s", err)
+            return self._hdo
+
+        changed = self._hdo is not None and schedule.differs_from(self._hdo, today)
+        self._hdo = schedule
+        self._hdo_date = today
+
+        if changed:
+            _LOGGER.info("EGD: rozvrh HDO se změnil, používám nové časy")
+        else:
+            _LOGGER.debug("EGD: rozvrh HDO obnoven (režim %s)", mode)
 
         return self._hdo
 
@@ -242,7 +278,26 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         schedule = hdo if hdo is not None else self._hdo
         if schedule is None:
             return None
-        return "NT" if schedule.is_low_tariff(dt_util.now()) else "VT"
+        low = schedule.is_low_tariff(dt_util.now())
+        if low is None:
+            return None  # rozvrh pro dnešek není znám
+        return "NT" if low else "VT"
+
+    def next_tariff_change(self) -> datetime | None:
+        """Okamžik příští změny tarifu; None při jednotarifu.
+
+        Počítá se z rozvrhu v paměti, bez volání API.
+        """
+        if self._hdo is None:
+            return None
+        return self._hdo.next_change(dt_util.now())
+
+    def tariff_after_change(self) -> str | None:
+        """Na jaký tarif se při příští změně přepne."""
+        current = self.current_tariff()
+        if current is None:
+            return None
+        return "VT" if current == "NT" else "NT"
 
     def current_price(self) -> float | None:
         """Cena za kWh platná právě teď."""
@@ -253,7 +308,10 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._hdo is None:
             # Jednotarif – VT je jediná zadaná cena
             return period.price_vt
-        return period.price_nt if self._hdo.is_low_tariff(now) else period.price_vt
+        low = self._hdo.is_low_tariff(now)
+        if low is None:
+            return None
+        return period.price_nt if low else period.price_vt
 
     async def _quarter_costs(
         self, quarters: dict[datetime, float]
@@ -270,6 +328,7 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         hdo = await self._async_hdo()
         costs: dict[datetime, float] = {}
+        missing_schedule: set[date] = set()
 
         for start_utc, energy in quarters.items():
             start_local = start_utc.astimezone(dt_util.DEFAULT_TIME_ZONE)
@@ -278,8 +337,24 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # Spotřeba před první zadanou cenou se záměrně neoceňuje
                 continue
 
-            nt_fraction = hdo.nt_fraction(start_local, 15) if hdo else 0.0
+            if hdo is None:
+                nt_fraction = 0.0  # jednotarif – vše za cenu VT
+            else:
+                nt_fraction = hdo.nt_fraction(start_local, 15)
+                if nt_fraction is None:
+                    # Rozvrh pro ten den neznáme (např. vypršela jeho platnost).
+                    # Radši spotřebu neocenit, než ji celou naúčtovat ve VT.
+                    missing_schedule.add(start_local.date())
+                    continue
+
             costs[start_utc] = energy * period.price_for(nt_fraction)
+
+        if missing_schedule:
+            _LOGGER.warning(
+                "EGD: pro %d dní (%s – %s) není v kalendáři HDO platný rozvrh, "
+                "náklady za ně nepočítám. Ověřte kód HDO na hdo.distribuce24.cz/casy.",
+                len(missing_schedule), min(missing_schedule), max(missing_schedule),
+            )
 
         return costs
 

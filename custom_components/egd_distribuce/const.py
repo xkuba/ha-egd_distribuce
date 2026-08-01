@@ -66,6 +66,7 @@ CONF_HDO_A         = "hdo_a"          # klasický příkazový kód – část A
 CONF_HDO_B         = "hdo_b"          # klasický příkazový kód – část B
 CONF_HDO_DP        = "hdo_dp"         # klasický příkazový kód – část DP
 CONF_HDO_VARIANT   = "hdo_variant"    # rozlišení relé, když kód není jednoznačný
+CONF_HDO_REFRESH_DAYS = "hdo_refresh_days"  # jak často znovu stahovat rozvrh
 CONF_PRICE_PERIODS = "price_periods"  # seznam cenových období (platnost od)
 
 # Režimy určení tarifu
@@ -76,6 +77,9 @@ HDO_MODE_CLASSIC = "classic"  # klasický elektroměr – PSČ + A/B/DP
 # Výchozí hodnoty
 DEFAULT_SCAN_DAYS   = 30
 DEFAULT_UPDATE_HOUR = 17   # Ve 17:xx stahujeme (data jsou dostupná od odpoledne)
+# Sezónní přechody zvládne rozvrh z paměti; obnova je kvůli tomu, že distributor
+# může změnit samotné časy. To se děje zřídka, týden je rozumný kompromis.
+DEFAULT_HDO_REFRESH_DAYS = 7
 
 # Měna nákladových statistik a senzorů
 CURRENCY_CZK = "CZK"

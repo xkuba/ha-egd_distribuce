@@ -24,12 +24,14 @@ from .const import (
     CONF_HDO_DP,
     CONF_HDO_MODE,
     CONF_HDO_PSC,
+    CONF_HDO_REFRESH_DAYS,
     CONF_HDO_VARIANT,
     CONF_HISTORY_FROM,
     CONF_METER_TYPE,
     CONF_PRICE_PERIODS,
     CONF_TEST_MODE,
     CONF_UPDATE_HOUR,
+    DEFAULT_HDO_REFRESH_DAYS,
     DEFAULT_SCAN_DAYS,
     DEFAULT_UPDATE_HOUR,
     DOMAIN,
@@ -242,6 +244,7 @@ class EgdOptionsFlowHandler(config_entries.OptionsFlow):
         if user_input is not None:
             mode = user_input[CONF_HDO_MODE]
             self._options[CONF_HDO_MODE] = mode
+            self._options[CONF_HDO_REFRESH_DAYS] = user_input[CONF_HDO_REFRESH_DAYS]
 
             if mode == HDO_MODE_NONE:
                 for key in (
@@ -319,6 +322,12 @@ class EgdOptionsFlowHandler(config_entries.OptionsFlow):
                     CONF_HDO_DP,
                     description={"suggested_value": self._options.get(CONF_HDO_DP, "")},
                 ): str,
+                vol.Required(
+                    CONF_HDO_REFRESH_DAYS,
+                    default=self._options.get(
+                        CONF_HDO_REFRESH_DAYS, DEFAULT_HDO_REFRESH_DAYS
+                    ),
+                ): vol.All(int, vol.Range(min=1, max=90)),
             }
         )
         return self.async_show_form(

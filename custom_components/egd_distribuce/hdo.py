@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
 import aiohttp
@@ -128,13 +128,21 @@ class HdoSchedule:
             raise HdoError("Rozvrh HDO neobsahuje žádný záznam")
         self._records = records
 
-    def _windows_for(self, day: date) -> list[tuple[int, int]]:
-        """Intervaly nízkého tarifu (v minutách od půlnoci) pro zadaný den."""
+    def _windows_for(self, day: date) -> list[tuple[int, int]] | None:
+        """Intervaly nízkého tarifu (v minutách od půlnoci) pro zadaný den.
+
+        Vrací None, pokud pro daný den v kalendáři není platný záznam – to je
+        něco jiného než prázdný seznam (den, kdy nízký tarif prostě není).
+        Rozlišení je podstatné: část rozvrhů má konkrétní rok platnosti, a po
+        jeho vypršení bychom jinak mlčky účtovali všechno ve vysokém tarifu.
+        """
         weekday = day.isoweekday()  # 1 = pondělí, shodně s denVTydnu
+        matched_season = False
 
         for record in self._records:
             if not _in_season(record, day):
                 continue
+            matched_season = True
             for sazba in record.get("sazby") or []:
                 for den in sazba.get("dny") or []:
                     if den.get("denVTydnu") != weekday:
@@ -144,47 +152,113 @@ class HdoSchedule:
                         for c in den.get("casy") or []
                         if c.get("od") and c.get("do")
                     ]
-        return []
 
-    def nt_fraction(self, start_local: datetime, duration_minutes: int) -> float:
+        # Sezónní záznam existuje, ale pro tento den v týdnu žádné okno nemá –
+        # API takové dny prostě vynechá (víkendová sazba D61d uvádí jen pá–ne).
+        # To znamená „celý den vysoký tarif“, nikoli neznámý rozvrh.
+        return [] if matched_season else None
+
+    def has_schedule_for(self, day: date) -> bool:
+        """Je pro zadaný den v kalendáři platný rozvrh?"""
+        return self._windows_for(day) is not None
+
+    def nt_fraction(
+        self, start_local: datetime, duration_minutes: int
+    ) -> float | None:
         """Jaká část intervalu spadá do nízkého tarifu (0.0 – 1.0).
 
         Některé rozvrhy přepínají na desetiminutách (07:20, 08:10), takže
         čtvrthodina může být rozdělená mezi oba tarify. Vracíme proto poměr,
         ne binární příznak – náklady se pak rozdělí přesně.
+
+        None znamená, že pro daný den není znám rozvrh; takovou spotřebu je
+        lepší neocenit než ocenit špatně.
         """
         if duration_minutes <= 0:
             return 0.0
+
+        windows = self._windows_for(start_local.date())
+        if windows is None:
+            return None
 
         begin = start_local.hour * 60 + start_local.minute
         end = begin + duration_minutes
         overlap = 0
 
-        for win_start, win_end in self._windows_for(start_local.date()):
+        for win_start, win_end in windows:
             overlap += max(0, min(end, win_end) - max(begin, win_start))
 
         # Přesah přes půlnoc (u čtvrthodin nenastává, ale ať je metoda obecná)
         if end > MINUTES_PER_DAY:
-            next_day = start_local.date().toordinal() + 1
-            for win_start, win_end in self._windows_for(date.fromordinal(next_day)):
+            next_day = date.fromordinal(start_local.date().toordinal() + 1)
+            for win_start, win_end in self._windows_for(next_day) or []:
                 overlap += max(0, min(end - MINUTES_PER_DAY, win_end) - win_start)
 
         return min(1.0, overlap / duration_minutes)
 
-    def nt_hours_per_day(self, day: date) -> float:
-        """Kolik hodin nízkého tarifu má zadaný den."""
-        minutes = 0
-        for start, end in self._windows_for(day):
-            minutes += max(0, end - start)
-        return round(minutes / 60, 2)
+    def nt_hours_per_day(self, day: date) -> float | None:
+        """Kolik hodin nízkého tarifu má zadaný den (None = rozvrh není znám)."""
+        windows = self._windows_for(day)
+        if windows is None:
+            return None
+        return round(sum(max(0, e - s) for s, e in windows) / 60, 2)
 
-    def is_low_tariff(self, moment_local: datetime) -> bool:
-        """Je v daném okamžiku nízký tarif?"""
+    def is_low_tariff(self, moment_local: datetime) -> bool | None:
+        """Je v daném okamžiku nízký tarif? None = rozvrh pro ten den není znám."""
+        windows = self._windows_for(moment_local.date())
+        if windows is None:
+            return None
         minute = moment_local.hour * 60 + moment_local.minute
-        return any(
-            start <= minute < end
-            for start, end in self._windows_for(moment_local.date())
-        )
+        return any(start <= minute < end for start, end in windows)
+
+    def differs_from(self, other: HdoSchedule, around: date, days: int = 14) -> bool:
+        """Liší se rozvrhy v okolí zadaného data?
+
+        Porovnáváme vypočtená okna, ne surové záznamy – distributor může
+        přeuspořádat data, aniž by se změnily skutečné časy.
+        """
+        for offset in range(-days, days + 1):
+            day = around + timedelta(days=offset)
+            if self._windows_for(day) != other._windows_for(day):
+                return True
+        return False
+
+    def next_change(
+        self, after_local: datetime, max_days: int = 14
+    ) -> datetime | None:
+        """Nejbližší okamžik po `after_local`, kdy se tarif přepne.
+
+        Kandidáty jsou začátky a konce oken plus půlnoc (rozvrh se liší podle
+        dne v týdnu i sezóny). Prohledáváme dopředu po dnech, protože při
+        celodenním tarifu může být další změna až za několik dní.
+        """
+        current = self.is_low_tariff(after_local)
+        if current is None:
+            return None
+
+        tzinfo = after_local.tzinfo
+        start_day = after_local.date()
+
+        for offset in range(max_days + 1):
+            day = start_day + timedelta(days=offset)
+
+            marks = {0}  # půlnoc – tam se rozvrh může změnit i beze změny okna
+            for win_start, win_end in self._windows_for(day) or []:
+                marks.add(win_start)
+                if win_end < MINUTES_PER_DAY:
+                    marks.add(win_end)
+
+            for minute in sorted(marks):
+                moment = datetime.combine(
+                    day, time(minute // 60, minute % 60), tzinfo=tzinfo
+                )
+                if moment <= after_local:
+                    continue
+                state = self.is_low_tariff(moment)
+                if state is not None and state != current:
+                    return moment
+
+        return None
 
 
 class HdoClient:
