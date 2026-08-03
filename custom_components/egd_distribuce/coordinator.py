@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -20,6 +20,9 @@ import homeassistant.util.dt as dt_util
 
 from .api import EgdApi, EgdApiError, EgdPermissionError
 from .const import (
+    CONF_ADVANCE_PAYMENT,
+    CONF_ADVANCE_PERIODS,
+    CONF_BILLING_DATE,
     CONF_EAN,
     CONF_HDO_A,
     CONF_HDO_B,
@@ -32,6 +35,7 @@ from .const import (
     CONF_HISTORY_FROM,
     CONF_METER_TYPE,
     CONF_PRICE_PERIODS,
+    CONF_TARIFF_ENTITY,
     CONF_UPDATE_HOUR,
     CURRENCY_CZK,
     DEFAULT_HDO_REFRESH_DAYS,
@@ -43,9 +47,14 @@ from .const import (
     HDO_MODE_SMART,
     METER_TYPE_AB,
     STAT_SUFFIX_COST,
+    STAT_SUFFIX_TOTAL_COST,
+    TARIFF_CHECK_MARGIN_MINUTES,
+    TARIFF_NT,
+    TARIFF_STATES,
+    TARIFF_VT,
 )
 from .hdo import HdoClient, HdoError, HdoSchedule
-from .pricing import PriceList
+from .pricing import AdvancePeriod, AdvanceSchedule, PriceList
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -117,9 +126,18 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Den, ke kterému je rozvrh načtený – distributor může časy změnit,
         # tak ho po nastavené periodě stahujeme znovu.
         self._hdo_date: date | None = None
+        # Od kdy trvá neshoda kalendáře s elektroměrem (None = shoda)
+        self._tariff_mismatch_since: datetime | None = None
+        # Poslední nerozpoznaná hodnota z entity tarifu – ať nelogujeme donekonečna
+        self._unknown_tariff_state: str | None = None
         # Náklady za probíhající měsíc (bez stálé platby) a měsíc, k němuž patří
         self._month_energy_cost: float | None = None
+        # Náklady za energii od posledního vyúčtování
+        self._billing_energy_cost: float | None = None
         self._month_key: tuple[int, int] | None = None
+        # Kopie options z posledního nastavení – slouží k rozhodnutí,
+        # jestli změna vyžaduje reload, nebo stačí přepočet.
+        self.tracked_options: dict[str, Any] = {}
 
         super().__init__(
             hass,
@@ -147,6 +165,7 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             await self._sync_history(days)
             await self._async_hdo()  # ať senzor tarifu zná rozvrh hned po startu
             await self._load_month_cost()
+            await self._load_billing_cost()
             self._initial_sync_done = True
             return self._build_state()
 
@@ -160,6 +179,7 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if last_date is None or last_date < yesterday:
                 await self._sync_range(yesterday, yesterday)
                 await self._load_month_cost()
+                await self._load_billing_cost()
 
         # Přelom měsíce – měsíční náklady je potřeba načíst znovu
         if self._month_key != (now.year, now.month):
@@ -184,6 +204,15 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Typ měřiče z konfigurace."""
         return self._entry.data.get(CONF_METER_TYPE, METER_TYPE_AB)
 
+    def remember_options(self) -> None:
+        """Zapamatuje si aktuální options pro příští porovnání."""
+        self.tracked_options = dict(self._entry.options)
+
+    def invalidate_hdo(self) -> None:
+        """Zahodí načtený rozvrh, aby se při dalším refreshi stáhl znovu."""
+        self._hdo = None
+        self._hdo_date = None
+
     # ------------------------------------------------------------------
     # Tarif a ceny
     # ------------------------------------------------------------------
@@ -195,7 +224,13 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     @property
     def cost_statistic_id(self) -> str:
+        """Statistika ceny za energii – tahle patří do panelu energie."""
         return f"{DOMAIN}:{self.ean}_{STAT_SUFFIX_COST}"
+
+    @property
+    def total_cost_statistic_id(self) -> str:
+        """Statistika celkových nákladů včetně stálé platby."""
+        return f"{DOMAIN}:{self.ean}_{STAT_SUFFIX_TOTAL_COST}"
 
     @property
     def pricing_enabled(self) -> bool:
@@ -273,15 +308,111 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return self._hdo
 
-    def current_tariff(self, hdo: HdoSchedule | None = None) -> str | None:
-        """Aktuálně platný tarif: "NT", "VT", nebo None při jednotarifu."""
+    @property
+    def tariff_entity_id(self) -> str | None:
+        """Entita s tarifem z elektroměru, pokud je nastavená."""
+        return self._entry.options.get(CONF_TARIFF_ENTITY) or None
+
+    def meter_tariff(self) -> str | None:
+        """Tarif přečtený přímo z elektroměru; None když entita není nastavená.
+
+        Elektroměr je pro živý tarif spolehlivější než kalendář – hlásí stav,
+        podle kterého se skutečně účtuje, ne předpověď.
+        """
+        entity_id = self.tariff_entity_id
+        if not entity_id:
+            return None
+
+        state = self.hass.states.get(entity_id)
+        if state is None or state.state in (None, "", "unknown", "unavailable"):
+            return None
+
+        raw = str(state.state).strip()
+        tariff = TARIFF_STATES.get(raw.lower())
+
+        if tariff is None and raw != self._unknown_tariff_state:
+            # Bez tohohle by se integrace jen tiše vrátila ke kalendáři
+            # a uživatel by netušil, že entita hlásí něco neočekávaného.
+            self._unknown_tariff_state = raw
+            _LOGGER.warning(
+                "EGD: entita %s hlásí tarif %r, kterému nerozumím – používám "
+                "kalendář HDO. Očekávám VT/NT, T2/T3 nebo 2/3; hodnotu lze "
+                "přemapovat filtrem v ESPHome.",
+                entity_id, raw,
+            )
+        elif tariff is not None:
+            self._unknown_tariff_state = None
+
+        return tariff
+
+    def calendar_tariff(self, hdo: HdoSchedule | None = None) -> str | None:
+        """Tarif podle rozvrhu HDO; None při jednotarifu nebo neznámém rozvrhu."""
         schedule = hdo if hdo is not None else self._hdo
         if schedule is None:
             return None
         low = schedule.is_low_tariff(dt_util.now())
         if low is None:
-            return None  # rozvrh pro dnešek není znám
-        return "NT" if low else "VT"
+            return None
+        return TARIFF_NT if low else TARIFF_VT
+
+    def current_tariff(self, hdo: HdoSchedule | None = None) -> str | None:
+        """Aktuálně platný tarif: "NT", "VT", nebo None při jednotarifu.
+
+        Přednost má hodnota z elektroměru, kalendář je záloha.
+        """
+        return self.meter_tariff() or self.calendar_tariff(hdo)
+
+    @property
+    def tariff_source(self) -> str | None:
+        """Odkud pochází aktuální tarif – "meter" nebo "calendar"."""
+        if self.meter_tariff() is not None:
+            return "meter"
+        if self.calendar_tariff() is not None:
+            return "calendar"
+        return None
+
+    def _near_tariff_switch(self) -> bool:
+        """Jsme blízko přepnutí dle kalendáře?
+
+        Kolem hranice se měřič a kalendář legitimně liší o pár minut, takže
+        tam nemá smysl hlásit neshodu.
+        """
+        if self._hdo is None:
+            return False
+
+        now = dt_util.now()
+        margin = timedelta(minutes=TARIFF_CHECK_MARGIN_MINUTES)
+
+        upcoming = self._hdo.next_change(now)
+        if upcoming is not None and upcoming - now <= margin:
+            return True
+        previous = self._hdo.next_change(now - margin)
+        return previous is not None and previous <= now
+
+    def check_tariff_agreement(self) -> bool | None:
+        """Souhlasí kalendář HDO s tarifem z elektroměru?
+
+        None = nelze porovnat (chybí jeden ze zdrojů nebo jsme na hranici).
+        Neshoda skoro jistě znamená špatně zadaný HDO kód nebo relé, což by
+        jinak tiše znehodnotilo všechny spočítané náklady.
+        """
+        meter = self.meter_tariff()
+        calendar = self.calendar_tariff()
+        if meter is None or calendar is None or self._near_tariff_switch():
+            return None
+
+        agrees = meter == calendar
+        if agrees:
+            self._tariff_mismatch_since = None
+        elif self._tariff_mismatch_since is None:
+            self._tariff_mismatch_since = dt_util.now()
+            _LOGGER.warning(
+                "EGD: elektroměr hlásí %s, ale rozvrh HDO očekává %s. "
+                "Zkontrolujte kód HDO a výběr relé – náklady se počítají "
+                "z kalendáře, takže by vycházely špatně.",
+                meter, calendar,
+            )
+        return agrees
 
     def next_tariff_change(self) -> datetime | None:
         """Okamžik příští změny tarifu; None při jednotarifu.
@@ -305,13 +436,11 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         period = self.price_list.for_date(now.date())
         if period is None:
             return None
-        if self._hdo is None:
-            # Jednotarif – VT je jediná zadaná cena
-            return period.price_vt
-        low = self._hdo.is_low_tariff(now)
-        if low is None:
-            return None
-        return period.price_nt if low else period.price_vt
+        tariff = self.current_tariff()
+        if tariff is None:
+            # Jednotarif (nebo neznámý rozvrh) – VT je jediná zadaná cena
+            return period.price_vt if self._hdo is None else None
+        return period.price_nt if tariff == TARIFF_NT else period.price_vt
 
     async def _quarter_costs(
         self, quarters: dict[datetime, float]
@@ -579,7 +708,11 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self._sync_costs(quarter_data.get("consumption_kwh", {}))
 
     async def _sync_costs(self, quarters: dict[datetime, float]) -> None:
-        """Spočítá a zapíše hodinovou statistiku nákladů za spotřebu."""
+        """Spočítá a zapíše nákladové statistiky.
+
+        Zapisují se dvě: samotná cena za energii (do panelu energie) a celkové
+        náklady se stálou platbou rozpuštěnou do hodin (odpovídá faktuře).
+        """
         if not quarters or not self.pricing_enabled:
             return
 
@@ -587,12 +720,53 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not costs:
             return
 
+        hourly_energy = self._group_by_hour(costs)
+
         await self._import_statistics(
             statistic_id=self.cost_statistic_id,
             unit=CURRENCY_CZK,
             name=f"EGD {self.ean} Náklady na spotřebu",
-            hourly=self._group_by_hour(costs),
+            hourly=hourly_energy,
         )
+
+        await self._import_statistics(
+            statistic_id=self.total_cost_statistic_id,
+            unit=CURRENCY_CZK,
+            name=f"EGD {self.ean} Náklady celkem vč. stálé platby",
+            hourly=self._with_standing_charge(hourly_energy),
+        )
+
+    def _with_standing_charge(
+        self, hourly_energy: dict[datetime, float]
+    ) -> dict[datetime, float]:
+        """Přidá k hodinovým nákladům podíl stálé platby.
+
+        Denní část platby se rozpustí rovnoměrně mezi hodiny daného dne, které
+        opravdu zapisujeme. Součet za celý den tak vyjde přesně na denní podíl
+        a graf nemá skoky – a funguje to i ve dnech s 23 nebo 25 hodinami.
+        """
+        prices = self.price_list
+        by_day: dict[date, list[datetime]] = {}
+        for hour in hourly_energy:
+            day = hour.astimezone(dt_util.DEFAULT_TIME_ZONE).date()
+            by_day.setdefault(day, []).append(hour)
+
+        result = dict(hourly_energy)
+        for day, hours in by_day.items():
+            fee = prices.daily_standing_charge(day)
+            if not fee:
+                continue
+
+            # Podíly počítáme jako rozdíly kumulativního součtu, ne jako
+            # fee/n dokola. Jinak by se zaokrouhlení každé hodiny sečetlo
+            # do systematické odchylky (u 310 Kč/měsíc ~0,3 Kč za rok).
+            count = len(hours)
+            previous = 0.0
+            for index, hour in enumerate(sorted(hours), start=1):
+                cumulative = round(fee * index / count, 4)
+                result[hour] += cumulative - previous
+                previous = cumulative
+        return result
 
     async def _import_statistics(
         self,
@@ -698,18 +872,123 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._month_key = (now.year, now.month)
 
     @property
+    def month_standing_charge(self) -> float:
+        """Stálá platba naběhlá od začátku měsíce do dneška."""
+        today = dt_util.now().date()
+        return self.price_list.standing_charge(today.replace(day=1), today)
+
+    @property
     def month_cost_total(self) -> float | None:
-        """Náklady za probíhající měsíc včetně stálé platby."""
-        if self._month_energy_cost is None:
+        """Náklady za probíhající měsíc včetně naběhlé stálé platby.
+
+        Prvního dne v měsíci ještě nejsou data o spotřebě, ale stálá platba
+        známá je – proto vracíme ji, ne „neznámo".
+        """
+        if not self.pricing_enabled:
             return None
-        period = self.price_list.for_date(dt_util.now().date())
-        fee = period.monthly_fee if period else 0.0
-        return round(self._month_energy_cost + fee, 2)
+        return round((self._month_energy_cost or 0.0) + self.month_standing_charge, 2)
 
     @property
     def month_energy_cost(self) -> float | None:
         """Náklady za odebranou energii v probíhajícím měsíci (bez stálé platby)."""
         return self._month_energy_cost
+
+    # ------------------------------------------------------------------
+    # Vyúčtování
+    # ------------------------------------------------------------------
+
+    @property
+    def billing_date(self) -> date | None:
+        """Datum posledního vyúčtování z konfigurace."""
+        raw = str(self._entry.options.get(CONF_BILLING_DATE, "")).strip()
+        if not raw:
+            return None
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            _LOGGER.warning("EGD: neplatné datum vyúčtování %r", raw)
+            return None
+
+    @property
+    def advance_schedule(self) -> AdvanceSchedule:
+        """Rozpis záloh z konfigurace.
+
+        Zálohy se zadávají jen tam, kde se částka mění – stejně jako ceny.
+        Ověřeno proti skutečné faktuře: tři řádky rozpisu reprodukovaly všech
+        dvanáct plateb za rok včetně součtu na korunu.
+        """
+        raw = self._entry.options.get(CONF_ADVANCE_PERIODS)
+        if raw:
+            return AdvanceSchedule.from_options(raw)
+
+        # Převod dřívějšího jednoho pole "měsíční záloha", aby se už zadaná
+        # hodnota neztratila – platí od data vyúčtování.
+        legacy = self._entry.options.get(CONF_ADVANCE_PAYMENT)
+        billing = self.billing_date
+        if legacy and billing is not None:
+            try:
+                return AdvanceSchedule([AdvancePeriod(billing, float(legacy))])
+            except (TypeError, ValueError):
+                pass
+        return AdvanceSchedule([])
+
+    async def _load_billing_cost(self) -> None:
+        """Načte náklady od posledního vyúčtování z nákladové statistiky."""
+        self._billing_energy_cost = None
+
+        start_date = self.billing_date
+        if start_date is None or not self.pricing_enabled:
+            return
+
+        start = datetime.combine(
+            start_date, time.min, tzinfo=dt_util.DEFAULT_TIME_ZONE
+        )
+        stat_id = self.cost_statistic_id
+        stats = await get_instance(self.hass).async_add_executor_job(
+            lambda: statistics_during_period(
+                self.hass, start, None, {stat_id}, "day", None, {"change"}
+            )
+        )
+        rows = stats.get(stat_id) or []
+        if not rows:
+            self._billing_energy_cost = 0.0
+            return
+
+        self._billing_energy_cost = round(
+            sum(float(r.get("change") or 0.0) for r in rows), 2
+        )
+
+    @property
+    def billing_summary(self) -> dict[str, Any] | None:
+        """Přehled od posledního vyúčtování; None když datum není zadané."""
+        start_date = self.billing_date
+        if start_date is None or not self.pricing_enabled:
+            return None
+
+        today = dt_util.now().date()
+        energy = self._billing_energy_cost or 0.0
+        fee = self.price_list.standing_charge(start_date, today)
+        total = round(energy + fee, 2)
+
+        schedule = self.advance_schedule
+        payments = schedule.payments(start_date, today) if schedule else []
+        paid = round(sum(a for _, a in payments), 2)
+        upcoming = schedule.next_payment(today) if schedule else None
+
+        return {
+            "od": start_date,
+            "dny": (today - start_date).days + 1,
+            "energie": round(energy, 2),
+            "stale_platby": round(fee, 2),
+            "celkem": total,
+            "pocet_zaloh": len(payments),
+            "zaplaceno": paid,
+            "posledni_zaloha": payments[-1][0] if payments else None,
+            "dalsi_zaloha": upcoming[0] if upcoming else None,
+            "dalsi_castka": upcoming[1] if upcoming else None,
+            # Kladné číslo = nedoplatek, záporné = přeplatek
+            "rozdil": round(total - paid, 2) if schedule else None,
+        }
 
     def _build_state(self) -> dict[str, Any]:
         """Vrátí dict s posledními dostupnými denními hodnotami pro senzory."""
@@ -719,6 +998,8 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "values": self._latest_values,
             "dates": {k: v.isoformat() for k, v in self._latest_dates.items()},
             "tariff": self.current_tariff(),
+            "tariff_source": self.tariff_source,
+            "tariff_agrees": self.check_tariff_agreement(),
             "price": self.current_price(),
             "month_cost": self.month_cost_total,
             "month_energy_cost": self._month_energy_cost,

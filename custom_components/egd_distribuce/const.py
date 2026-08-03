@@ -67,7 +67,14 @@ CONF_HDO_B         = "hdo_b"          # klasický příkazový kód – část B
 CONF_HDO_DP        = "hdo_dp"         # klasický příkazový kód – část DP
 CONF_HDO_VARIANT   = "hdo_variant"    # rozlišení relé, když kód není jednoznačný
 CONF_HDO_REFRESH_DAYS = "hdo_refresh_days"  # jak často znovu stahovat rozvrh
+CONF_TARIFF_ENTITY = "tariff_entity"  # entita s tarifem přímo z elektroměru
 CONF_PRICE_PERIODS = "price_periods"  # seznam cenových období (platnost od)
+
+# Options klíče – vyúčtování
+CONF_BILLING_DATE = "billing_date"          # datum posledního vyúčtování (YYYY-MM-DD)
+CONF_ADVANCE_PERIODS = "advance_periods"    # rozpis záloh (platnost od + částka)
+# Starší jednorázové pole – zachováno kvůli převodu už zadané hodnoty
+CONF_ADVANCE_PAYMENT = "advance_payment"
 
 # Režimy určení tarifu
 HDO_MODE_NONE    = "none"     # jednotarif – ceny bez rozlišení VT/NT
@@ -84,8 +91,28 @@ DEFAULT_HDO_REFRESH_DAYS = 7
 # Měna nákladových statistik a senzorů
 CURRENCY_CZK = "CZK"
 
-# Suffix statistiky nákladů (doplňuje se k profilu spotřeby)
+# Označení tarifů
+TARIFF_VT = "VT"
+TARIFF_NT = "NT"
+
+# Hodnoty, kterými elektroměr hlásí tarif. XT211 posílá v registru
+# 0.0.96.14.0.255 číslo – dle datasheetu 2 = VT, 3 = NT. Textové varianty
+# přidány pro případ, že si je uživatel přemapuje už v ESPHome.
+TARIFF_STATES = {
+    "2": TARIFF_VT, "vt": TARIFF_VT, "high": TARIFF_VT, "t2": TARIFF_VT,
+    "3": TARIFF_NT, "nt": TARIFF_NT, "low": TARIFF_NT, "t3": TARIFF_NT,
+}
+
+# Jak daleko od přepnutí dle kalendáře smíme porovnávat s měřičem.
+# Blízko hranice se obojí legitimně liší o pár minut, což není chyba.
+TARIFF_CHECK_MARGIN_MINUTES = 5
+
+# Suffixy nákladových statistik.
+# _consumption_cost je čistě cena za odebranou energii – patří do panelu energie.
+# _total_cost navíc obsahuje stálou platbu rozpuštěnou do hodin, takže odpovídá
+# tomu, co reálně zaplatíte. Do panelu energie se nehodí (není to cena za kWh).
 STAT_SUFFIX_COST = "consumption_cost"
+STAT_SUFFIX_TOTAL_COST = "total_cost"
 
 # Coordinator klíče
 COORDINATOR_KEY = "coordinator"

@@ -18,12 +18,16 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.event import async_track_point_in_time
+from homeassistant.helpers.event import (
+    async_track_point_in_time,
+    async_track_state_change_event,
+)
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 import homeassistant.util.dt as dt_util
 
 from .const import (
     CONF_EAN,
+    CONF_TARIFF_ENTITY,
     COORDINATOR_KEY,
     CURRENCY_CZK,
     DOMAIN,
@@ -158,6 +162,24 @@ _SENSOR_TARIFF = SensorEntityDescription(
     icon="mdi:toggle-switch-outline",
 )
 
+_SENSOR_BILLING = SensorEntityDescription(
+    key="billing_cost",
+    name="Náklady od vyúčtování",
+    device_class=SensorDeviceClass.MONETARY,
+    native_unit_of_measurement=CURRENCY_CZK,
+    icon="mdi:file-document-outline",
+    suggested_display_precision=2,
+)
+
+_SENSOR_BALANCE = SensorEntityDescription(
+    key="billing_balance",
+    name="Rozdíl proti zálohám",
+    device_class=SensorDeviceClass.MONETARY,
+    native_unit_of_measurement=CURRENCY_CZK,
+    icon="mdi:scale-balance",
+    suggested_display_precision=2,
+)
+
 _SENSOR_NEXT_CHANGE = SensorEntityDescription(
     key="next_tariff_change",
     name="Následující změna tarifu",
@@ -204,6 +226,16 @@ async def async_setup_entry(
             EgdMonthCostSensor(coordinator, _SENSOR_MONTH_COST, ean),
             EgdCurrentPriceSensor(coordinator, _SENSOR_CURRENT_PRICE, ean),
         ]
+        # Vyúčtování jen když je zadané datum, od kterého se má počítat
+        if coordinator.billing_date is not None:
+            price_entities.append(
+                EgdBillingCostSensor(coordinator, _SENSOR_BILLING, ean)
+            )
+            # Rozdíl proti zálohám dává smysl jen se zadaným rozpisem
+            if coordinator.advance_schedule:
+                price_entities.append(
+                    EgdBillingBalanceSensor(coordinator, _SENSOR_BALANCE, ean)
+                )
         # Tarif a jeho změny mají smysl jen při dvoutarifu
         if coordinator.current_tariff() is not None:
             price_entities.append(EgdTariffSensor(coordinator, _SENSOR_TARIFF, ean))
@@ -356,6 +388,20 @@ class _EgdTariffAwareSensor(_EgdBaseSensor):
         await super().async_added_to_hass()
         self._schedule_next()
 
+        # Tarif z elektroměru se mění nezávisle na kalendáři – reagujeme hned,
+        # jinak by senzor čekal na nejbližší kalendářní přepnutí.
+        entity_id = self.coordinator.tariff_entity_id
+        if entity_id:
+            self.async_on_remove(
+                async_track_state_change_event(
+                    self.hass, [entity_id], self._handle_meter_event
+                )
+            )
+
+    @callback
+    def _handle_meter_event(self, _event) -> None:
+        self.async_write_ha_state()
+
     async def async_will_remove_from_hass(self) -> None:
         self._cancel_timer()
         await super().async_will_remove_from_hass()
@@ -411,7 +457,9 @@ class EgdMonthCostSensor(_EgdBaseSensor):
         period = self.coordinator.price_list.for_date(dt_util.now().date())
         return {
             "naklady_za_energii": self.coordinator.month_energy_cost,
-            "stala_platba": period.monthly_fee if period else None,
+            # Naběhlá část, ne celá měsíční platba – stejně jako na faktuře
+            "stala_platba_dosud": round(self.coordinator.month_standing_charge, 2),
+            "stala_platba_mesicni": period.monthly_fee if period else None,
             "cenove_obdobi_od": (
                 period.valid_from.isoformat() if period else None
             ),
@@ -465,6 +513,11 @@ class EgdTariffSensor(_EgdTariffAwareSensor):
         return {
             "zmena_v": moment.isoformat() if moment else None,
             "zmena_na": self.coordinator.tariff_after_change(),
+            "zdroj": self.coordinator.tariff_source,
+            "tarif_z_meraku": self.coordinator.meter_tariff(),
+            "tarif_z_kalendare": self.coordinator.calendar_tariff(),
+            # None = nelze porovnat (chybí zdroj nebo jsme na hranici přepnutí)
+            "kalendar_souhlasi": self.coordinator.check_tariff_agreement(),
         }
 
 
@@ -481,3 +534,99 @@ class EgdNextTariffChangeSensor(_EgdTariffAwareSensor):
             "soucasny_tarif": self.coordinator.current_tariff(),
             "zmena_na": self.coordinator.tariff_after_change(),
         }
+
+
+class EgdBillingCostSensor(_EgdBaseSensor):
+    """Náklady naběhlé od posledního vyúčtování – odhad další faktury.
+
+    Je to odhad, ne faktura: nezahrnuje dodatečné opravy od dodavatele a data
+    z EG.D chodí se zpožděním jednoho dne.
+    """
+
+    _attr_state_class = SensorStateClass.TOTAL
+
+    @property
+    def native_value(self) -> float | None:
+        summary = self.coordinator.billing_summary
+        return summary["celkem"] if summary else None
+
+    @property
+    def last_reset(self) -> datetime | None:
+        billing = self.coordinator.billing_date
+        if billing is None:
+            return None
+        return datetime.combine(
+            billing, datetime.min.time(), tzinfo=dt_util.DEFAULT_TIME_ZONE
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        summary = self.coordinator.billing_summary
+        if summary is None:
+            return {}
+
+        attrs: dict[str, Any] = {
+            "od_data": summary["od"].isoformat(),
+            "pocet_dni": summary["dny"],
+            "naklady_za_energii": summary["energie"],
+            "stale_platby": summary["stale_platby"],
+            "posledni_zapocteny_den": self.coordinator.data.get("dates", {}).get(
+                "consumption_kwh"
+            )
+            if self.coordinator.data
+            else None,
+        }
+
+        if summary["rozdil"] is not None:
+            rozdil = summary["rozdil"]
+            attrs.update({
+                "pocet_zaloh": summary["pocet_zaloh"],
+                "zaplacene_zalohy": summary["zaplaceno"],
+                "rozdil": rozdil,
+                "stav": "nedoplatek" if rozdil > 0 else "přeplatek",
+            })
+            if summary["dalsi_zaloha"]:
+                attrs["dalsi_zaloha"] = summary["dalsi_zaloha"].isoformat()
+                attrs["dalsi_castka"] = summary["dalsi_castka"]
+        return attrs
+
+
+class EgdBillingBalanceSensor(_EgdBaseSensor):
+    """Rozdíl mezi naběhlými náklady a zaplacenými zálohami.
+
+    Kladná hodnota = nedoplatek (dosud jste zaplatil míň, než spotřeboval),
+    záporná = přeplatek. Zakládá se jen se zadanou měsíční zálohou.
+    """
+
+    @property
+    def native_value(self) -> float | None:
+        summary = self.coordinator.billing_summary
+        if summary is None:
+            return None
+        return summary["rozdil"]
+
+    @property
+    def icon(self) -> str:
+        value = self.native_value
+        if value is None:
+            return "mdi:scale-balance"
+        return "mdi:cash-minus" if value > 0 else "mdi:cash-plus"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        summary = self.coordinator.billing_summary
+        if summary is None or summary["rozdil"] is None:
+            return {}
+        attrs = {
+            "stav": "nedoplatek" if summary["rozdil"] > 0 else "přeplatek",
+            "od_data": summary["od"].isoformat(),
+            "naklady_celkem": summary["celkem"],
+            "zaplacene_zalohy": summary["zaplaceno"],
+            "pocet_zaloh": summary["pocet_zaloh"],
+        }
+        if summary["posledni_zaloha"]:
+            attrs["posledni_zaloha"] = summary["posledni_zaloha"].isoformat()
+        if summary["dalsi_zaloha"]:
+            attrs["dalsi_zaloha"] = summary["dalsi_zaloha"].isoformat()
+            attrs["dalsi_castka"] = summary["dalsi_castka"]
+        return attrs

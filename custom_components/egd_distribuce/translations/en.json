@@ -9,7 +9,7 @@
           "client_secret": "Client Secret",
           "ean": "Metering point EAN",
           "test_mode": "Test environment",
-          "history_from": "History start date (YYYY-MM-DD)"
+          "history_from": "Load history from (YYYY-MM-DD)"
         },
         "data_description": {
           "client_id": "Client ID generated in the Distribuce24 portal",
@@ -36,18 +36,131 @@
     "step": {
       "init": {
         "title": "EG.D Distribuce settings",
+        "description": "Choose what to edit. Changes are saved only when you pick “Save and close”.",
+        "menu_options": {
+          "zakladni": "Data download",
+          "hdo": "HDO tariff (VT/NT)",
+          "ceny": "Price periods",
+          "vyuctovani": "Billing",
+          "zalohy": "Advance payments",
+          "ulozit": "Save and close"
+        }
+      },
+      "zakladni": {
+        "title": "Data download",
         "data": {
-          "update_hour": "Data download hour (0–23)",
+          "update_hour": "Download hour (0–23)",
           "history_from": "History start date (YYYY-MM-DD)"
         },
         "data_description": {
-          "update_hour": "Data will be downloaded on the first coordinator run at or after this hour. EGD data is usually available from the afternoon (recommended: 17).",
-          "history_from": "Full history will be downloaded from this date on next restart. Empty = last 30 days."
+          "update_hour": "Data is downloaded on the first tick at or after this hour. EGD data is usually available from the afternoon (recommended: 17).",
+          "history_from": "History is downloaded from this date. Empty = last 30 days. If the date predates your data authorization, the range is narrowed automatically."
+        }
+      },
+      "hdo": {
+        "title": "HDO tariff",
+        "description": "The tariff is not part of the metering API; it comes from the public HDO schedule. Find your code on the HDO receiver by the meter or in the Distribuce24 app.",
+        "data": {
+          "hdo_mode": "How to determine the tariff",
+          "hdo_code": "HDO code (smart meter, e.g. Cd2526_2)",
+          "hdo_psc": "Postal code (classic meter)",
+          "hdo_a": "Command code – A",
+          "hdo_b": "Command code – B",
+          "hdo_dp": "Command code – DP",
+          "hdo_refresh_days": "Schedule refresh (days)",
+          "tariff_entity": "Tariff entity from the meter (optional)"
+        },
+        "data_description": {
+          "hdo_mode": "none = single tariff, smart = code like Cd2526_2, classic = postal code + A/B/DP command code",
+          "hdo_code": "Only for smart mode",
+          "hdo_psc": "Only for classic mode – determines the distribution region",
+          "hdo_a": "Only for classic mode",
+          "hdo_b": "Only for classic mode",
+          "hdo_dp": "Only for classic mode",
+          "hdo_refresh_days": "How often to re-download the HDO calendar. Seasonal changes work from memory without a refresh – this is for when the distributor changes the actual times. Default 7 days.",
+          "tariff_entity": "A sensor reporting the current tariff straight from the meter (register 0.0.96.14.0.255 on the XT211). More reliable than the calendar because it reports the real state – the integration uses it for live sensors and also to verify your HDO code. Accepts VT/NT, T2/T3 and 2/3; anything else is logged and the calendar is used."
+        }
+      },
+      "hdo_varianta": {
+        "title": "Schedule selection",
+        "description": "Several schedules match your code (e.g. separate relays for heating and hot water). Pick the one that controls your tariff – the hours per day are shown to help.",
+        "data": {
+          "hdo_variant": "Schedule"
+        }
+      },
+      "ceny": {
+        "title": "Price periods",
+        "description": "Each period is valid from its date until the next one starts. That way a price increase does not overwrite costs already computed for older data.\n\nCurrently set:\n{obdobi}",
+        "menu_options": {
+          "cena_pridat": "Add period",
+          "cena_smazat": "Remove period",
+          "init": "Back"
+        }
+      },
+      "cena_pridat": {
+        "title": "Add price period",
+        "description": "Enter the final price per kWh including distribution, fees and taxes.",
+        "data": {
+          "valid_from": "Valid from (YYYY-MM-DD)",
+          "price_vt": "High tariff price (CZK/kWh)",
+          "price_nt": "Low tariff price (CZK/kWh)",
+          "monthly_fee": "Standing monthly charge (CZK)"
+        },
+        "data_description": {
+          "valid_from": "A period with the same date is overwritten.",
+          "price_vt": "For a single tariff, put your only price here.",
+          "price_nt": "Leave empty for a single tariff – the high tariff price is used.",
+          "monthly_fee": "Counted into the monthly cost sensor, not into the Energy Dashboard."
+        }
+      },
+      "cena_smazat": {
+        "title": "Remove price periods",
+        "data": {
+          "smazat": "Periods to delete"
+        }
+      },
+      "vyuctovani": {
+        "title": "Billing",
+        "description": "Enter the date of your last invoice and the integration will track what has accrued since – an estimate of the next bill.\n\nThe advance payment schedule is entered separately under Advance payments.\n\nThis is an estimate, not an invoice: it excludes later corrections from your supplier and EG.D data arrives one day late.",
+        "data": {
+          "billing_date": "Last billing date (YYYY-MM-DD)"
+        },
+        "data_description": {
+          "billing_date": "The date on the invoice from which the new period starts. Empty = the sensor is not created."
+        }
+      },
+      "zalohy": {
+        "title": "Advance payments",
+        "description": "Enter only the points where the amount changes – same as with prices. The day of month is taken from the date you enter and stays valid until another entry changes it.\n\nYou can find the schedule on your invoice.\n\nCurrently set:\n{rozpis}",
+        "menu_options": {
+          "zaloha_pridat": "Add change",
+          "zaloha_smazat": "Remove",
+          "init": "Back"
+        }
+      },
+      "zaloha_pridat": {
+        "title": "Add advance payment change",
+        "description": "Date of the first payment at the new amount. Its day of month is reused for the following months.",
+        "data": {
+          "valid_from": "Valid from (YYYY-MM-DD)",
+          "amount": "Amount (CZK)"
+        },
+        "data_description": {
+          "valid_from": "E.g. 2025-01-10 means payments on the 10th of each month. An entry with the same date is overwritten.",
+          "amount": "Amount including VAT, as shown on the invoice."
+        }
+      },
+      "zaloha_smazat": {
+        "title": "Remove from the advance schedule",
+        "data": {
+          "smazat": "Entries to delete"
         }
       }
     },
     "error": {
-      "invalid_date": "Invalid date – use YYYY-MM-DD format (e.g. 2026-06-04)"
+      "invalid_date": "Invalid date – use YYYY-MM-DD format (e.g. 2026-06-04)",
+      "hdo_not_found": "No HDO schedule matches this code. Verify it at hdo.distribuce24.cz/casy.",
+      "hdo_error": "Could not load the HDO schedule – check the values you entered and your connection."
     }
   }
 }

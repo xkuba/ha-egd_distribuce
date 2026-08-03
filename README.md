@@ -113,9 +113,14 @@ Po přidání lze upravit v **Nastavení → Zařízení a služby → EG.D Dist
 | Stahování dat | Datum počátku historie | 30 dní zpět | Od tohoto data se stáhne zpětná historie |
 | Tarif HDO | Způsob určení tarifu | jednotarif | Viz [Náklady na elektřinu](#náklady-na-elektřinu) |
 | Tarif HDO | Obnova rozvrhu | 7 dní | Jak často znovu stáhnout kalendář HDO (1–90) |
+| Tarif HDO | Entita s tarifem z elektroměru | – | Volitelné, viz níže |
 | Cenová období | Ceny a stálá platba | – | Seznam období s platností od data |
+| Vyúčtování | Datum posledního vyúčtování | – | Volitelné, zapne senzor odhadu faktury |
+| Zálohy | Rozpis záloh | – | Volitelné, zapne senzor přeplatek/nedoplatek |
 
 Změny se ukládají až volbou **„Uložit a zavřít"**, takže lze v jednom průchodu přidat víc cenových období.
+
+Integrace se po změně nastavení **znovu načte jen když je to nutné** – tedy když přibude nebo zmizí senzor, případně když se změní kód HDO. U změny cen nebo data vyúčtování se jen přepočítají data a entity nikam nezmizí.
 
 Pokud zadané datum sahá dál, než kam má účet oprávnění, integrace rozsah **sama zúží** na nejstarší dostupný den – nespadne.
 
@@ -214,6 +219,30 @@ Vyberte ten, jehož počet hodin odpovídá vaší sazbě (např. D57d má 20 h,
 
 Sezónní varianty (zima/léto) řeší integrace sama – vybíráte jen relé.
 
+#### Tarif přímo z elektroměru (doporučeno)
+
+Máte-li chytrý elektroměr čtený lokálně (např. XT211 přes ESPHome a DLMS/RS485), vyplňte v konfiguraci **„Entita s tarifem z elektroměru"**. Získáte tím dvě věci:
+
+- **Živé senzory berou tarif z měřiče**, ne z kalendáře. Měřič hlásí stav, podle kterého se skutečně účtuje, takže odpadá jakákoli nejistota v předpovědi.
+- **Integrace hlídá správnost kódu HDO.** Průběžně porovnává, co říká měřič, s tím, co předpovídá kalendář. Při neshodě zapíše varování do logu. Špatně zadaný kód nebo špatně zvolené relé je jinak skoro nezjistitelné a tiše by znehodnotilo všechny spočítané náklady.
+
+Rozpozná `VT`/`NT`, `T2`/`T3` i syrové `2`/`3` (dle datasheetu XT211 je 2 = VT, 3 = NT). Jinou hodnotu ohlásí v logu a použije kalendář – stejně tak když je entita nedostupná.
+
+U ESPHome se hodí hodnotu přemapovat už na zařízení, ať je čitelná i tam:
+
+```yaml
+    filters:
+      - map:
+          - "T2 -> VT"
+          - "T3 -> NT"
+```
+
+Kolem okamžiku přepnutí se pár minut neporovnává – měřič a kalendář se tam legitimně liší a hlásit to jako chybu by bylo matoucí.
+
+Historické náklady se počítají **vždy z kalendáře** – měřič umí říct jen „teď".
+
+Atributy senzoru tarifu ukazují `zdroj` (meter/calendar), `tarif_z_meraku`, `tarif_z_kalendare` a `kalendar_souhlasi`.
+
 #### Obnova rozvrhu
 
 Kalendář se stahuje jednou za **7 dní** (nastavitelné 1–90 v poli „Obnova rozvrhu").
@@ -251,7 +280,8 @@ Vzniknou, jakmile zadáte aspoň jedno cenové období:
 
 | Senzor | Hodnota |
 |---|---|
-| Náklady tento měsíc | spotřeba × cena + stálá platba, reset k 1. dni měsíce |
+| Náklady tento měsíc | spotřeba × cena + naběhlá stálá platba, reset k 1. dni |
+| Náklady od vyúčtování | odhad další faktury (jen se zadaným datem vyúčtování) |
 | Aktuální cena | Kč/kWh platná právě teď dle tarifu a období |
 | Aktuální tarif | VT / NT (jen při dvoutarifu) |
 | Následující změna tarifu | čas nejbližšího přepnutí (jen při dvoutarifu) |
@@ -259,6 +289,62 @@ Vzniknou, jakmile zadáte aspoň jedno cenové období:
 Senzory tarifu a ceny se překreslují **přesně v okamžik přepnutí**, ne až s hodinovým tikem integrace – rozvrhy přepínají i na půlhodinách a desetiminutách. Rozvrh je v paměti, takže to nestojí žádné volání API.
 
 Senzor měsíčních nákladů do panelu energie **nepatří** – stálá platba není za kWh a se statistikou nákladů by se dublovala.
+
+### Dvě nákladové statistiky
+
+| Statistika | Obsahuje | Kam patří |
+|---|---|---|
+| `egd_distribuce:<EAN>_consumption_cost` | jen cena za odebranou energii | **Energy Dashboard** |
+| `egd_distribuce:<EAN>_total_cost` | navíc stálá platba | grafy celkových nákladů |
+
+Do panelu energie patří ta první – stálá platba není za kWh a zkreslila by přepočty na Kč/kWh. Druhá odpovídá tomu, co reálně zaplatíte; stálá platba je v ní rozpuštěná rovnoměrně do hodin, takže součet za libovolné období vychází přesně.
+
+Měsíční historii celkových nákladů dostanete kartou:
+
+```yaml
+type: statistics-graph
+entities:
+  - egd_distribuce:<EAN>_total_cost
+period: month
+chart_type: bar
+stat_types:
+  - change
+```
+
+### Vyúčtování a odhad další faktury
+
+V **Konfigurovat → Vyúčtování** zadejte datum poslední faktury. Vznikne senzor **Náklady od vyúčtování**, který ukazuje, kolik od té doby naběhlo – tedy odhad toho, co přijde příště.
+
+### Zálohy
+
+V **Konfigurovat → Zálohy** zadejte rozpis. Nezadávají se jednotlivé platby, ale jen **okamžiky, kdy se částka mění** – stejně jako u cen:
+
+```
+od 10.10.2024:  5 450 Kč
+od 11.11.2024:  5 780 Kč
+od 10.01.2025:  5 080 Kč
+```
+
+Den v měsíci se převezme ze zadaného data. Platí pravidlo **jedna záloha za kalendářní měsíc**, částka i den podle posledního platného záznamu. Rozpis najdete na faktuře v tabulce „Předpis budoucích stanovených zálohových plateb".
+
+Se zadaným rozpisem vznikne druhý senzor **Rozdíl proti zálohám**: kladná hodnota je nedoplatek, záporná přeplatek.
+
+> Ověřeno proti skutečné faktuře E.ON: tři řádky rozpisu reprodukovaly všech dvanáct plateb za roční období včetně součtu 62 730 Kč na korunu.
+
+| Atribut | Význam |
+|---|---|
+| `od_data`, `pocet_dni` | období, za které se počítá |
+| `naklady_za_energii` | spotřeba × cena dle tarifu |
+| `stale_platby` | stálá platba naběhlá po dnech |
+| `pocet_zaloh`, `zaplacene_zalohy` | jen se zadaným rozpisem záloh |
+| `posledni_zaloha`, `dalsi_zaloha`, `dalsi_castka` | kdy platba proběhla a kdy přijde další |
+| `rozdil`, `stav` | kladné = nedoplatek, záporné = přeplatek |
+
+Je to **odhad, ne faktura** – nezahrnuje dodatečné opravy od dodavatele a data z EG.D chodí se zpožděním jednoho dne.
+
+**Stálá platba se všude počítá po dnech**, ne po celých měsících: denní podíl = měsíční platba ÷ počet dní v daném měsíci. Součet přes celý měsíc dá přesně měsíční platbu, a neúplné měsíce vyjdou správně i když vyúčtování přijde k libovolnému datu. Změní-li se platba mezi cenovými obdobími, každý den se počítá tou svou.
+
+> Ověřeno proti faktuře E.ON: sloupec „Počet jednotek" u položky Stálý plat uváděl 3,133 / 3,233 / 5,733 měsíce a náš výpočet dává přesně totéž. Dodavatel používá stejný algoritmus.
 
 ### Přesnost
 

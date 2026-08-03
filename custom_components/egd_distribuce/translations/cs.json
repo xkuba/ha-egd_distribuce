@@ -41,7 +41,9 @@
           "zakladni": "Stahování dat",
           "hdo": "Tarif HDO (VT/NT)",
           "ceny": "Cenová období",
-          "ulozit": "Uložit a zavřít"
+          "ulozit": "Uložit a zavřít",
+          "vyuctovani": "Vyúčtování",
+          "zalohy": "Zálohy"
         }
       },
       "zakladni": {
@@ -65,7 +67,8 @@
           "hdo_a": "Příkazový kód – A",
           "hdo_b": "Příkazový kód – B",
           "hdo_dp": "Příkazový kód – DP",
-          "hdo_refresh_days": "Obnova rozvrhu (dny)"
+          "hdo_refresh_days": "Obnova rozvrhu (dny)",
+          "tariff_entity": "Entita s tarifem z elektroměru (volitelné)"
         },
         "data_description": {
           "hdo_mode": "none = jednotarif (jedna cena), smart = kód typu Cd2526_2, classic = PSČ + příkazový kód A/B/DP",
@@ -74,7 +77,8 @@
           "hdo_a": "Vyplňte jen u režimu classic",
           "hdo_b": "Vyplňte jen u režimu classic",
           "hdo_dp": "Vyplňte jen u režimu classic",
-          "hdo_refresh_days": "Jak často znovu stáhnout kalendář HDO. Sezónní přechody zvládne rozvrh z paměti i bez obnovy – ta je kvůli tomu, že distributor může změnit samotné časy. Výchozí 7 dní."
+          "hdo_refresh_days": "Jak často znovu stáhnout kalendář HDO. Sezónní přechody zvládne rozvrh z paměti i bez obnovy – ta je kvůli tomu, že distributor může změnit samotné časy. Výchozí 7 dní.",
+          "tariff_entity": "Senzor, který hlásí aktuální tarif přímo z elektroměru (u XT211 registr 0.0.96.14.0.255). Je spolehlivější než kalendář, protože hlásí skutečný stav – integrace ho použije pro živé senzory a zároveň jím hlídá, jestli je zadaný kód HDO správný. Rozpozná VT/NT, T2/T3 i 2/3; jinou hodnotu ohlásí v logu a použije kalendář."
         }
       },
       "hdo_varianta": {
@@ -113,6 +117,43 @@
         "title": "Odebrat cenová období",
         "data": {
           "smazat": "Období ke smazání"
+        }
+      },
+      "vyuctovani": {
+        "title": "Vyúčtování",
+        "description": "Zadejte datum posledního vyúčtování a integrace bude počítat, kolik od té doby naběhlo – tedy odhad další faktury.\n\nRozpis záloh se zadává zvlášť v sekci Zálohy.\n\nJe to odhad, ne faktura: nezahrnuje dodatečné opravy od dodavatele a data z EG.D chodí se zpožděním jednoho dne.",
+        "data": {
+          "billing_date": "Datum posledního vyúčtování (YYYY-MM-DD)"
+        },
+        "data_description": {
+          "billing_date": "Datum z faktury, od kterého se má počítat nové období. Prázdné = senzor se nezaloží."
+        }
+      },
+      "zalohy": {
+        "title": "Zálohy",
+        "description": "Zadávejte jen okamžiky, kdy se výše zálohy mění – stejně jako u cen. Den v měsíci se převezme ze zadaného data a platí, dokud ho nezmění další záznam.\n\nRozpis najdete na faktuře v tabulce „Předpis budoucích stanovených zálohových plateb\".\n\nAktuálně nastaveno:\n{rozpis}",
+        "menu_options": {
+          "zaloha_pridat": "Přidat změnu zálohy",
+          "zaloha_smazat": "Odebrat",
+          "init": "Zpět"
+        }
+      },
+      "zaloha_pridat": {
+        "title": "Přidat změnu zálohy",
+        "description": "Datum první zálohy v nové výši. Den v měsíci z tohoto data se použije i pro další měsíce.",
+        "data": {
+          "valid_from": "Platnost od (YYYY-MM-DD)",
+          "amount": "Výše zálohy (Kč)"
+        },
+        "data_description": {
+          "valid_from": "Např. 10.01.2025 znamená zálohy vždy k 10. dni v měsíci. Záznam se stejným datem se přepíše.",
+          "amount": "Částka včetně DPH, jak je uvedená na faktuře."
+        }
+      },
+      "zaloha_smazat": {
+        "title": "Odebrat ze rozpisu záloh",
+        "data": {
+          "smazat": "Záznamy ke smazání"
         }
       }
     },

@@ -11,6 +11,7 @@ from homeassistant import config_entries
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResult
 import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import EgdApi, EgdApiError, EgdAuthError, EgdPermissionError, EgdUnsupportedMeterError
@@ -28,7 +29,10 @@ from .const import (
     CONF_HDO_VARIANT,
     CONF_HISTORY_FROM,
     CONF_METER_TYPE,
+    CONF_ADVANCE_PERIODS,
+    CONF_BILLING_DATE,
     CONF_PRICE_PERIODS,
+    CONF_TARIFF_ENTITY,
     CONF_TEST_MODE,
     CONF_UPDATE_HOUR,
     DEFAULT_HDO_REFRESH_DAYS,
@@ -41,10 +45,14 @@ from .const import (
 )
 from .hdo import HdoClient, HdoError
 from .pricing import (
+    KEY_ADVANCE_AMOUNT,
+    KEY_ADVANCE_FROM,
     KEY_MONTHLY_FEE,
     KEY_PRICE_NT,
     KEY_PRICE_VT,
     KEY_VALID_FROM,
+    AdvancePeriod,
+    AdvanceSchedule,
     PriceList,
     PricePeriod,
 )
@@ -178,7 +186,7 @@ class EgdOptionsFlowHandler(config_entries.OptionsFlow):
 
         return self.async_show_menu(
             step_id="init",
-            menu_options=["zakladni", "hdo", "ceny", "ulozit"],
+            menu_options=["zakladni", "hdo", "ceny", "vyuctovani", "zalohy", "ulozit"],
         )
 
     async def async_step_ulozit(
@@ -245,6 +253,13 @@ class EgdOptionsFlowHandler(config_entries.OptionsFlow):
             mode = user_input[CONF_HDO_MODE]
             self._options[CONF_HDO_MODE] = mode
             self._options[CONF_HDO_REFRESH_DAYS] = user_input[CONF_HDO_REFRESH_DAYS]
+            # Entita s tarifem z elektroměru je nezávislá na režimu –
+            # dává smysl i u jednotarifu jako kontrola.
+            tariff_entity = user_input.get(CONF_TARIFF_ENTITY) or ""
+            if tariff_entity:
+                self._options[CONF_TARIFF_ENTITY] = tariff_entity
+            else:
+                self._options.pop(CONF_TARIFF_ENTITY, None)
 
             if mode == HDO_MODE_NONE:
                 for key in (
@@ -328,6 +343,16 @@ class EgdOptionsFlowHandler(config_entries.OptionsFlow):
                         CONF_HDO_REFRESH_DAYS, DEFAULT_HDO_REFRESH_DAYS
                     ),
                 ): vol.All(int, vol.Range(min=1, max=90)),
+                vol.Optional(
+                    CONF_TARIFF_ENTITY,
+                    description={
+                        "suggested_value": self._options.get(CONF_TARIFF_ENTITY, "")
+                    },
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(
+                        domain=["sensor", "binary_sensor", "input_select", "input_text"]
+                    )
+                ),
             }
         )
         return self.async_show_form(
@@ -352,6 +377,132 @@ class EgdOptionsFlowHandler(config_entries.OptionsFlow):
             }
         )
         return self.async_show_form(step_id="hdo_varianta", data_schema=schema)
+
+    # ------------------------------------------------------------------
+    # Vyúčtování
+    # ------------------------------------------------------------------
+
+    async def async_step_vyuctovani(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Datum posledního vyúčtování a měsíční záloha."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            billing = user_input.get(CONF_BILLING_DATE, "").strip()
+            if billing:
+                try:
+                    date.fromisoformat(billing)
+                except ValueError:
+                    errors[CONF_BILLING_DATE] = "invalid_date"
+
+            if not errors:
+                if billing:
+                    self._options[CONF_BILLING_DATE] = billing
+                else:
+                    self._options.pop(CONF_BILLING_DATE, None)
+                return await self.async_step_init()
+
+        schema = vol.Schema(
+            {
+                vol.Optional(
+                    CONF_BILLING_DATE,
+                    description={
+                        "suggested_value": self._options.get(CONF_BILLING_DATE, "")
+                    },
+                ): str,
+            }
+        )
+        return self.async_show_form(
+            step_id="vyuctovani", data_schema=schema, errors=errors
+        )
+
+    # ------------------------------------------------------------------
+    # Zálohy
+    # ------------------------------------------------------------------
+
+    @property
+    def _advances(self) -> AdvanceSchedule:
+        return AdvanceSchedule.from_options(self._options.get(CONF_ADVANCE_PERIODS))
+
+    async def async_step_zalohy(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Přehled rozpisu záloh."""
+        return self.async_show_menu(
+            step_id="zalohy",
+            menu_options=["zaloha_pridat", "zaloha_smazat", "init"],
+            description_placeholders={
+                "rozpis": "\n".join(f"• {p.label}" for p in self._advances)
+                or "(zatím žádný)"
+            },
+        )
+
+    async def async_step_zaloha_pridat(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Přidání změny výše zálohy."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            try:
+                valid_from = date.fromisoformat(
+                    user_input[KEY_ADVANCE_FROM].strip()
+                )
+            except ValueError:
+                errors[KEY_ADVANCE_FROM] = "invalid_date"
+            else:
+                periods = [
+                    p.as_dict()
+                    for p in self._advances
+                    if p.valid_from != valid_from
+                ]
+                periods.append(
+                    AdvancePeriod(
+                        valid_from=valid_from,
+                        amount=float(user_input[KEY_ADVANCE_AMOUNT]),
+                    ).as_dict()
+                )
+                self._options[CONF_ADVANCE_PERIODS] = sorted(
+                    periods, key=lambda p: p[KEY_ADVANCE_FROM]
+                )
+                return await self.async_step_zalohy()
+
+        schema = vol.Schema(
+            {
+                vol.Required(KEY_ADVANCE_FROM): str,
+                vol.Required(KEY_ADVANCE_AMOUNT): vol.Coerce(float),
+            }
+        )
+        return self.async_show_form(
+            step_id="zaloha_pridat", data_schema=schema, errors=errors
+        )
+
+    async def async_step_zaloha_smazat(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Odebrání položek rozpisu."""
+        periods = list(self._advances)
+        if not periods:
+            return await self.async_step_zalohy()
+
+        if user_input is not None:
+            smazat = set(user_input.get("smazat", []))
+            self._options[CONF_ADVANCE_PERIODS] = [
+                p.as_dict()
+                for p in periods
+                if p.valid_from.isoformat() not in smazat
+            ]
+            return await self.async_step_zalohy()
+
+        schema = vol.Schema(
+            {
+                vol.Optional("smazat", default=[]): cv.multi_select(
+                    {p.valid_from.isoformat(): p.label for p in periods}
+                )
+            }
+        )
+        return self.async_show_form(step_id="zaloha_smazat", data_schema=schema)
 
     # ------------------------------------------------------------------
     # Cenová období
