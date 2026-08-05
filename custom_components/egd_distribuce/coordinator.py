@@ -161,11 +161,17 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # takže po znovupřidání se stahování přeskočí a jinak bychom zůstali
             # bez hodnot pro senzory i bez informace o dostupných profilech.
             await self._load_state_from_recorder()
+
+            # Součty čteme z databáze JEŠTĚ PŘED synchronizací. Zápis statistik
+            # jde do fronty recorderu a v databázi se objeví se zpožděním, takže
+            # čtení hned po zápisu by vrátilo neúplná čísla. Nově zapsané hodiny
+            # si místo toho přičte _sync_costs.
+            await self._load_month_cost()
+            await self._load_billing_cost()
+
             days = self._resolve_history_days()
             await self._sync_history(days)
             await self._async_hdo()  # ať senzor tarifu zná rozvrh hned po startu
-            await self._load_month_cost()
-            await self._load_billing_cost()
             self._initial_sync_done = True
             return self._build_state()
 
@@ -177,9 +183,9 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Stáhni jen pokud ještě nemáme včerejší data
             last_date = await self._get_last_recorded_date()
             if last_date is None or last_date < yesterday:
+                # Součty aktualizuje _sync_costs z právě zapsaných hodin,
+                # znovu číst z databáze by bylo příliš brzy.
                 await self._sync_range(yesterday, yesterday)
-                await self._load_month_cost()
-                await self._load_billing_cost()
 
         # Přelom měsíce – měsíční náklady je potřeba načíst znovu
         if self._month_key != (now.year, now.month):
@@ -722,7 +728,7 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         hourly_energy = self._group_by_hour(costs)
 
-        await self._import_statistics(
+        written = await self._import_statistics(
             statistic_id=self.cost_statistic_id,
             unit=CURRENCY_CZK,
             name=f"EGD {self.ean} Náklady na spotřebu",
@@ -735,6 +741,34 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             name=f"EGD {self.ean} Náklady celkem vč. stálé platby",
             hourly=self._with_standing_charge(hourly_energy),
         )
+
+        self._add_written_costs(written)
+
+    def _add_written_costs(self, written: dict[datetime, float]) -> None:
+        """Přičte právě zapsané náklady k běžícím součtům.
+
+        Statistiky se zapisují do fronty recorderu, takže hned po zápisu
+        v databázi ještě nejsou. Kdybychom je odtud četli, dostali bychom
+        neúplná čísla – proto si součty vedeme sami. Dvojímu započítání
+        brání to, že _import_statistics vrací jen skutečně nové hodiny.
+        """
+        if not written:
+            return
+
+        today = dt_util.now().date()
+        month_start = today.replace(day=1)
+        billing = self.billing_date
+
+        for hour, value in written.items():
+            day = hour.astimezone(dt_util.DEFAULT_TIME_ZONE).date()
+            if day >= month_start:
+                self._month_energy_cost = round(
+                    (self._month_energy_cost or 0.0) + value, 4
+                )
+            if billing is not None and day >= billing:
+                self._billing_energy_cost = round(
+                    (self._billing_energy_cost or 0.0) + value, 4
+                )
 
     def _with_standing_charge(
         self, hourly_energy: dict[datetime, float]
@@ -774,9 +808,11 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         unit: str,
         name: str,
         hourly: dict[datetime, float],
-    ) -> None:
+    ) -> dict[datetime, float]:
         """
         Zapíše hodinové hodnoty do HA recorder jako external statistics.
+
+        Vrací hodiny, které se opravdu zapsaly (bez těch už uložených).
 
         Statistiky HA mají hodinovou granularitu, takže Energy Dashboard
         zobrazí skutečný průběh dne, ne jeden sloupec.
@@ -832,6 +868,11 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "EGD: zapsáno %d hodinových statistik pro %s (%d již uložených přeskočeno)",
                 len(statistics), statistic_id, skipped,
             )
+
+        # Vracíme jen skutečně zapsané hodiny. Zápis jde do fronty recorderu
+        # a v databázi se objeví až za chvíli, takže volající si z toho musí
+        # dopočítat součty sám – zpětné čtení by přišlo příliš brzy.
+        return {s["start"]: s["state"] for s in statistics}
 
     # ------------------------------------------------------------------
     # Stavový objekt pro senzory (aktuální hodnota = včerejšek)
