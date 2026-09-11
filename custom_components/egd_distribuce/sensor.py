@@ -475,6 +475,11 @@ class EgdMonthCostSensor(_EgdBaseSensor):
 class EgdCurrentPriceSensor(_EgdTariffAwareSensor):
     """Cena za kWh platná právě teď (dle tarifu a cenového období)."""
 
+    # Bez state_class se senzor nenabízí v Energy Dashboardu jako "entity
+    # s aktuální cenou" – jde o prostou okamžitou hodnotu, ne o kumulativní
+    # součet jako u objemových senzorů výše, takže MEASUREMENT je správně.
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
     @property
     def native_value(self) -> float | None:
         return self.coordinator.current_price()
