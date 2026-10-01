@@ -17,6 +17,7 @@ from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 import homeassistant.util.dt as dt_util
+from homeassistant.util.unit_conversion import EnergyConverter
 
 from .api import EgdApi, EgdApiError, EgdPermissionError
 from .const import (
@@ -827,6 +828,9 @@ class EgdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             name=name,
             source=DOMAIN,
             statistic_id=statistic_id,
+            # kWh → "energy" (HA umí převádět jednotky), CZK → None (bez převodu).
+            # Od HA 2026.11 povinné; hodnota odpovídá tomu, co HA dřív doplňoval sám.
+            unit_class=EnergyConverter.UNIT_CLASS if unit in EnergyConverter.VALID_UNITS else None,
             unit_of_measurement=unit,
         )
 

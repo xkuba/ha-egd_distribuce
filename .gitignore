@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Lokální poznámky, nepatří do repa
+TODO.md

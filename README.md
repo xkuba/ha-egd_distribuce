@@ -72,6 +72,7 @@ Senzory profilů, pro které API u daného EAN nevrací žádná data (typicky v
 
 ## Požadavky
 
+- Home Assistant ≥ 2025.11
 - Odběrné místo s typem měření **A, B nebo C1** (průmysl, výrobny, FVE, chytré elektroměry)
 - ⚠️ **Typ C4** (domácnosti bez chytrého elektroměru) **není podporován** – EGD API pro tento typ neposkytuje data
 - Účet na portálu [portal.distribuce24.cz](https://portal.distribuce24.cz)
